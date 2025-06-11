@@ -25,14 +25,14 @@
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
   #:use-module (ice-9 rdelim)
-  #:export (issue-token))
+  #:export (issue-token decode-token))
 
 (define (syscall cmd)
   (let* ((process (open-input-pipe cmd))
          (process-output (get-string-all process)))
     (close-pipe process) process-output))
 
-(define encryption-key
+(define some-key
   "10d0670c-e79b-406e-a37b-926d7b804be0")
 
 ;; I had trouble getting it working using echo with -n. This worked for me:
@@ -47,7 +47,7 @@
 
 ;; echo "ENCRYPTED_STRING" | openssl aes-256-cbc -d -pbkdf2 -a -k <password>
 
-(define* (issue-token #:key user-details-provider
+(define* (issue-token #:key user-details-provider encryption-key
                       (token-valid-seconds (* 60 60 48)))
   (let* ((token-id (generate-string-uuid))
          (now (current-time))
@@ -80,10 +80,9 @@
                         "echo \"~a\" | openssl enc -aes256 -pbkdf2 -base64 -k ~a"
                         tt encryption-key)))
          (clean-ttt (string-replace-substring e-t "\n" "")))
-    ;; (write token-data)
     clean-ttt))
 
-(define (decode-token token)
+(define* (decode-token #:key token encryption-key)
   (let* ((d (syscall (format #f
                       "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k ~a"
                       token encryption-key)))
@@ -91,18 +90,20 @@
          (d-t (syscall (format #f "echo '~a' | base64 --decode" d)))
 
          (tt (eval-string d-t)))
-     tt))
+    tt))
 
 (define (trial-run)
   (let* ((start (current-time))
-         (t (issue-token #:user-details-provider (lambda ()
+         (t (issue-token #:encryption-key some-key
+                         #:user-details-provider (lambda ()
                                                    `((id . "f421188e-3ca2-4d55-a65c-0278cd3f77b1")
                                                      (email . "jjbigorra@gmail.com")
                                                      (name . "Joe")
                                                      (permissions
                                                       bewaking:write
                                                       bewaking:read)))))
-         (d (decode-token t))
+         (d (decode-token #:token t
+                          #:encryption-key some-key))
          (end (current-time)))
     (write t)
     (newline)
