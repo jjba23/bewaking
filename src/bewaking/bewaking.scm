@@ -25,7 +25,7 @@
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
   #:use-module (ice-9 rdelim)
-  #:export (issue-token decode-token))
+  #:export (generate-secure-token decode-and-validate-token))
 
 (define (syscall cmd)
   (let* ((process (open-input-pipe cmd))
@@ -34,22 +34,6 @@
 
 (define some-key
   "10d0670c-e79b-406e-a37b-926d7b804be0")
-
-;; I had trouble getting it working using echo with -n. This worked for me:
-
-;; To encrypt:
-
-;; echo "PLAINTEXT_STRING" | openssl enc -aes256 -pbkdf2 -base64 -k <password>
-
-;; you'll be prompted to provide a decryption password.
-
-;; To decrypt:
-
-;; echo "ENCRYPTED_STRING" | openssl aes-256-cbc -d -pbkdf2 -a -k <password>
-
-;;;
-;;; Secure Token Generation
-;;;
 
 (define* (generate-secure-token #:key encryption-key
                                 (get-user-details (lambda ()
@@ -125,15 +109,59 @@
 
     token))
 
-(define* (decode-token #:key token encryption-key)
-  (let* ((d (syscall (format #f
-                      "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k ~a"
-                      token encryption-key)))
-         
-         (d-t (syscall (format #f "echo '~a' | base64 --decode" d)))
+(define* (decode-and-validate-token #:key token encryption-key)
+  "Decodes and validates a secure token that was created by generate-secure-token.
 
-         (tt (eval-string d-t)))
-    tt))
+  This function decrypts the token, decodes the payload, parses it safely,
+  and validates its claims (e.g., expiration time).
+
+  It accepts a single argument, 'options', which is an association list.
+
+  WARNING: This function depends on the `base64` and `openssl` command-line
+  utilities being available in the system's PATH.
+
+  #:returns: A parsed association list representing the token's payload if
+             the token is valid and successfully decoded.
+             Otherwise, it raises an error."
+
+  ;; Ensure required arguments are provided.
+  (unless token
+    (error
+     "decode-and-validate-token: The 'token' was not found in the options list."))
+  (unless encryption-key
+    (error
+     "decode-and-validate-token: The 'encryption-key' was not found in the options list."))
+
+  ;; Decrypt the token using OpenSSL.
+  ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
+  (let* ((decrypted-payload (syscall (format #f
+                                      "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
+                                      token encryption-key)))
+         
+         ;; Check if decryption produced any output. An empty string often
+         ;; indicates a decryption failure (e.g., wrong key).
+         (_ (if (string-null? decrypted-payload)
+                (error
+                 "decode-and-validate-token: Decryption failed. Is the key or token correct?")))
+
+         ;; Base64-decode the decrypted payload.
+         (payload-string (syscall (format #f "echo '~a' | base64 --decode"
+                                          decrypted-payload)))
+
+         ;; Safely parse the payload string into a Scheme object.
+         ;; We use `read` instead of `eval` to prevent code execution vulnerabilities.
+         (payload (eval-string payload-string)))
+    
+    ;; Validate the token's permissions.
+    (let ((expiration-timestamp (assoc-ref payload
+                                           'token-expires-at)))
+      (unless (and expiration-timestamp
+                   (number? expiration-timestamp))
+        (error
+         "decode-and-validate-token: Token is invalid. Missing or malformed 'token-expires-at'"))
+
+      (if (> (current-time) expiration-timestamp)
+          (error "decode-and-validate-token: Token has expired.") payload))))
 
 (define (trial-run)
   (let* ((start (current-time))
@@ -145,8 +173,8 @@
                                                           (permissions
                                                            bewaking:write
                                                            bewaking:read)))))
-         (d (decode-token #:token t
-                          #:encryption-key some-key))
+         (d (decode-and-validate-token #:token t
+                                       #:encryption-key some-key))
          (end (current-time)))
     (write t)
     (newline)
