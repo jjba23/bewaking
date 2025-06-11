@@ -1,0 +1,52 @@
+# bewaking
+
+# Copyright © Josep Bigorra <jjbigorra@gmail.com>
+
+# bewaking is free software: you can redistribute it and/or modify
+# it under the terms of the Lesser GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# bewaking is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# Lesser GNU General Public License for more details.
+
+# You should have received a copy of the Lesser GNU General Public License
+# along with bewaking.  If not, see <https://www.gnu.org/licenses/>.
+
+variables:
+  - &byggsteg_url 'https://byggsteg.jointhefreeworld.org'
+  - &byggsteg_submit_job_image 'jjba23/byggsteg-woodpecker-submit-job:v0.1.3'
+  - &byggsteg_poll_job_image 'jjba23/byggsteg-woodpecker-poll-job:v0.1.3'
+  
+steps:
+  submit-byggsteg-job-jointhefreeworld:
+    image: *byggsteg_submit_job_image
+    when:
+      - event: [ "push" ]
+        branch: [ "trunk" ]
+    settings:
+      BYGGSTEG_USERNAME:
+        from_secret: "BYGGSTEG_USERNAME"
+      BYGGSTEG_KEY:
+        from_secret: "BYGGSTEG_KEY"      
+      BYGGSTEG_URL: *byggsteg_url
+      BYGGSTEG_JOB_CODE: |
+        (lambda()
+          `((task . "make-test")
+            (project . "%%CI_REPO_NAME%%")
+            (branch-name . "%%CI_COMMIT_BRANCH%%")            
+            (clone-url . "%%CI_REPO_CLONE_URL%%")))
+            
+  poll-byggsteg-job-jointhefreeworld:
+    image: *byggsteg_poll_job_image
+    when:
+      - event: [ "push" ]
+        branch: [ "trunk" ]
+    settings:
+      BYGGSTEG_USERNAME:
+        from_secret: "BYGGSTEG_USERNAME"
+      BYGGSTEG_KEY:
+        from_secret: "BYGGSTEG_KEY"      
+      BYGGSTEG_URL: *byggsteg_url

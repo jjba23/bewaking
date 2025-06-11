@@ -26,12 +26,34 @@
   #:use-module (ice-9 textual-ports)
   #:use-module (ice-9 rdelim)
   #:export (generate-token decrypt-token unsafe-generate-token
+                           string-garble string-ungarble
                            unsafe-decrypt-token token-payload-valid?))
 
 (define (syscall cmd)
   (let* ((process (open-input-pipe cmd))
          (process-output (get-string-all process)))
     (close-pipe process) process-output))
+
+
+(define (string-garble s)
+  (let* ((len (string-length s))
+         (mid-point (floor (/ len 2)))
+         (first-half-original (substring s 0 mid-point))
+         (second-half-original (substring s mid-point len))
+         (first-half-reversed (string-reverse first-half-original))
+         (second-half-reversed (string-reverse second-half-original)))
+    (string-append second-half-reversed first-half-reversed)))
+
+
+(define (string-ungarble s)
+  (let* ((len (string-length s))
+         (len-original-first-half (floor (/ len 2)))
+         (len-original-second-half (- len len-original-first-half))
+         (reversed-original-second-half (substring s 0 len-original-second-half))
+         (reversed-original-first-half (substring s len-original-second-half len))
+         (original-second-half (string-reverse reversed-original-second-half))
+         (original-first-half (string-reverse reversed-original-first-half)))
+    (string-append original-first-half original-second-half)))
 
 (define (token-payload-valid? token)
   (and (not (equal? #f
@@ -130,7 +152,7 @@
       (error
        "generate-token: Owner details from #:get-owner-details must contain an 'id'."))
 
-    token))
+    (string-garble token)))
 
 (define* (unsafe-decrypt-token #:key token encryption-key)
   "Decodes and validates a secure token that was created by generate-token.
@@ -156,7 +178,7 @@
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
   (let* ((decrypted-payload (syscall (format #f
                                       "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
-                                      token encryption-key)))
+                                      (string-ungarble token) encryption-key)))
          
          ;; Check if decryption produced any output. An empty string often
          ;; indicates a decryption failure (e.g., wrong key).
