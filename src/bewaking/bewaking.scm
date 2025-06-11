@@ -16,20 +16,30 @@
 ;; along with bewaking.  If not, see <https://www.gnu.org/licenses/>.
 
 (define-module (bewaking bewaking)
+  #:use-module (uuid generate)
   #:export (issue-token))
 
-(define*)
+(define* (issue-token #:key user-details-provider
+                      (token-valid-seconds (* 60 60 48)))
+  (let* ((token-id (generate-string-uuid))
+         (now (current-time))
+         (user-details (user-details-provider))
+         (token-data `((token-type . bewaking-token)
+                       (token-id unquote token-id)
+                       (token-created-at unquote now)
+                       (token-expires-at unquote (+ now token-valid-seconds))
+                       (user-id unquote (assoc-ref user-details 'id))
+                       (user-email unquote (assoc-ref user-details 'email))
+                       (user-name unquote (assoc-ref user-details 'name))
+                       (user-permissions unquote (assoc-ref user-details 'permissions))))
+         (token (with-output-to-string (lambda() (write token-data)))))
+    token))
 
-;; Create secure tokens, token data itself consists of:
+(issue-token #:user-details-provider (lambda() `((id . "f421188e-3ca2-4d55-a65c-0278cd3f77b1")
+                                            (email . "jjbigorra@gmail.com")
+                                            (name . "Joe")
+                                            (permissions . (bewaking:write bewaking:read)))))
 
-;; {
-;;   "token-id": ,
-;;   "token-created-at": EPOCH SECONDS,
-;;   "token-expires-at": ,
-;;   "user-id": ,
-;;   "user-email": "jjbigorra@gmail.com",
-;;   "user-name": "Joe"
-;; }
 
 ;; Every call made, we need to hit db and decrypt, which means a bit of performance hit, so we can cache this for 5 minutes for example, 
 ;; Once logged in, you get a token, you then use the token for every call, we cache auth oks for 5 minutes, we do not cache auth errs
