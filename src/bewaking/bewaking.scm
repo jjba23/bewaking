@@ -30,6 +30,8 @@
                            string-garble
                            string-ungarble
                            unsafe-decrypt-token
+                           encrypt-payload
+                           decrypt-payload
                            token-payload-valid?))
 
 (define (syscall cmd)
@@ -81,7 +83,7 @@
                     (assoc-ref token
                                'owner-permissions)))))
 
-(define* (unsafe-generate-token #:key encryption-key
+(define* (unsafe-generate-token #:key encryption-key signing-key
                                 (get-owner-details (lambda ()
                                                      '()))
                                 (token-validity-seconds (* 72 3600)))
@@ -125,6 +127,12 @@
                                                   'permissions))))
          (_ (unless (token-payload-valid? payload)
               (error "Could not generate token from given payload!")))
+         (_ (unless encryption-key
+              (error
+               "generate-token: The #:encryption-key keyword argument is required.")))
+         (_ (unless owner-id
+              (error
+               "generate-token: Owner details from #:get-owner-details must contain an 'id'.")))
 
          ;; Serialize the payload into a string.
          (payload-string (with-output-to-string (lambda ()
@@ -139,25 +147,27 @@
          ;; -aes256: Specifies the AES-256 cipher.
          ;; -pbkdf2: Uses PBKDF2 to derive the key from the `encryption-key`.
          ;; -a -A: Base64-encodes the encrypted output for safe transport and all in 1 line.
-         (encrypted-payload (syscall (format #f
-                                      "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
-                                      base64-payload encryption-key)))
+         (encrypted-payload (encrypt-payload base64-payload encryption-key))
 
          ;; Clean the final token by removing any trailing whitespace from the
          ;; openssl output, producing the final token.
-         (token (string-trim-right encrypted-payload)))
+         (token (string-trim-right encrypted-payload))
+         (garbled-inner-token (string-garble token))
+         (signed-token (string-trim-right (encrypt-payload garbled-inner-token
+                                           signing-key))))
     
-    (unless encryption-key
-      (error
-       "generate-token: The #:encryption-key keyword argument is required."))
+    (string-garble signed-token)))
 
-    (unless owner-id
-      (error
-       "generate-token: Owner details from #:get-owner-details must contain an 'id'."))
+(define (encrypt-payload base64-payload k)
+  (syscall (format #f
+                   "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
+                   base64-payload k)))
 
-    (string-garble token)))
+(define (decrypt-payload base64-payload k)
+  (syscall (format #f "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
+                   base64-payload k)))
 
-(define* (unsafe-decrypt-token #:key token encryption-key)
+(define* (unsafe-decrypt-token #:key token encryption-key signing-key)
   "Decodes and validates a secure token that was created by generate-token.
 
   This function decrypts the token, decodes the payload, parses it safely,
@@ -174,15 +184,18 @@
   (unless token
     (error "decrypt-token: The 'token' was not found in the options list."))
   (unless encryption-key
-    (error
-     "decrypt-token: The 'encryption-key' was not found in the options list."))
+    (error "decrypt-token: The 'encryption-key' was not found."))
+  (unless signing-key
+    (error "decrypt-token: The 'signing-key' was not found."))
 
   ;; Decrypt the token using OpenSSL.
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
-  (let* ((decrypted-payload (syscall (format #f
-                                      "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
-                                      (string-ungarble token) encryption-key)))
-         
+  (let* ((decrypted-signed-payload (decrypt-payload (string-ungarble token)
+                                                    signing-key))
+         (decrypted-payload (decrypt-payload (string-ungarble
+                                              decrypted-signed-payload)
+                                             encryption-key))
+
          ;; Check if decryption produced any output. An empty string often
          ;; indicates a decryption failure (e.g., wrong key).
          (_ (if (string-null? decrypted-payload)
@@ -205,21 +218,23 @@
       (if (> (current-time) expiration-timestamp)
           (error "decrypt-token: Token has expired.") payload))))
 
-(define* (decrypt-token #:key token encryption-key)
+(define* (decrypt-token #:key token encryption-key signing-key)
   (catch #t
          (lambda ()
            (unsafe-decrypt-token #:token token
-                                 #:encryption-key encryption-key))
+                                 #:encryption-key encryption-key
+                                 #:signing-key signing-key))
          (lambda (key . args)
            (display (format #f "error decrypting token: ~a: ~a" key args)) #f)))
 
-(define* (generate-token #:key encryption-key
+(define* (generate-token #:key encryption-key signing-key
                          (get-owner-details (lambda ()
                                               '()))
                          (token-validity-seconds (* 72 3600)))
   (catch #t
          (lambda ()
            (unsafe-generate-token #:encryption-key encryption-key
+                                  #:signing-key signing-key
                                   #:get-owner-details get-owner-details
                                   #:token-validity-seconds
                                   token-validity-seconds))
