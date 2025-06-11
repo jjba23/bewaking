@@ -91,7 +91,7 @@
          (d-t (syscall (format #f "echo '~a' | base64 --decode" d)))
 
          (tt (eval-string d-t)))
-    (write d-t) tt))
+     tt))
 
 (define (trial-run)
   (let* ((start (current-time))
