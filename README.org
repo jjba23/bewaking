@@ -4,7 +4,7 @@
 [[https://jointhefreeworld.org/ggg/dist/gnu-make.svg]] 
 [[https://jointhefreeworld.org/ggg/dist/license-lgpl3+.svg]]    [[https://jointhefreeworld.org/ggg/dist/license-fdl13+.svg]]
 
-bewaking is a system for creating and verifying time-limited, encrypted digital credentials that carry specific user information securely, protected through multiple layers of cryptographic and obfuscation techniques, a.k.a *secure tokens*.
+bewaking helps you create and verify lifetime-limited encrypted digital credentials that carry specific user information securely, protected through multiple layers of cryptographic and obfuscation techniques, a.k.a *secure tokens*.
 
 If you like my work, please support me by [[https://bmc.link/jjbigorra][buying me a cup of coffee ☕]] so I can continue with a lot of motivation.
 
