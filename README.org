@@ -1,0 +1,8 @@
+#+title: Bewaking
+
+🚧 work-in-progress
+
+/bewaking/ means surveillance in the Dutch language
+
+This project provides helper code and a DSL to be used for Authorization and Authentication for your Guile Scheme projects.
+
