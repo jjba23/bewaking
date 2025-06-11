@@ -4,31 +4,61 @@
 [[https://jointhefreeworld.org/ggg/dist/gnu-make.svg]] 
 [[https://jointhefreeworld.org/ggg/dist/license-lgpl3+.svg]]    [[https://jointhefreeworld.org/ggg/dist/license-fdl13+.svg]]
 
-🚧 work-in-progress
-
-/bewaking/ means surveillance in the Dutch language
-
-This project provides helper code and a DSL to be used for Authorization and Authentication for your Guile Scheme projects.
+bewaking is a system for creating and verifying time-limited, encrypted digital credentials that carry specific user information securely, protected through multiple layers of cryptographic and obfuscation techniques, a.k.a *secure tokens*.
 
 If you like my work, please support me by [[https://bmc.link/jjbigorra][buying me a cup of coffee ☕]] so I can continue with a lot of motivation.
 
 ----------------
 
-* Thoughts
+* About bewaking
 
-Every call made, we need to hit db and decrypt, which means a bit of performance hit, so we can cache this for 5 minutes for example.
+This project provides a DSL to be used for Authorization and Authentication for your Guile Scheme projects.
 
-Once logged in, you get a token, you then use the token for every call, we cache auth oks for 5 minutes, we do not cache auth errs
-After 5 min we will hit db again to check for permission.
+/bewaking/ means surveillance in the Dutch language.
 
-This is separate from the token expiry time, which only when current-timestamp > token-expiry, then we need to log you out and you need to login again
+We rely on external tools like ~openssl~ and ~base64~ available on the system to perform its cryptographic heavy lifting.
 
-Then we take that token data (in Lisp/Scheme) and serialize it to JSON, minify, base64 encode it, reverse it, encrypt with some cypher (use openssl?), base64 encode it
+-----------------
 
-For decoding we base64 decode, decrypt it (use openssl?), reverse it, base64 decode it, and parse the JSON
+* Double Encryption and Obfuscation
+
+The code employs a multi-layered approach to secure the token:
+
+1. *First Encryption (Payload Encryption):*
+    - The s-expression *payload* (the actual information inside the token, in the form of Lisp (Guile Scheme) code) is first converted into a string and then *Base64-encoded*. Base64 is a way to represent binary data as text, making it safe for transmission over text-based systems.
+    - This Base64-encoded string is then encrypted using *AES-256* (a strong encryption standard) with an ~encryption-key~. This is the first layer of real cryptographic protection, making the payload unreadable without the correct key. The ~openssl~ command-line tool handles this. The output of this step is also Base64-encoded.
+
+2.  *Obfuscation (Garbling):*
+     - The result from the first encryption (which is already Base64-encoded and encrypted) is then passed through a function called `string-garble`. This function isn't encryption; it's a simple **obfuscation** technique. It takes the string, splits it in half, reverses each half, and then recombines them (second half reversed, then first half reversed). This makes the string look scrambled and harder to read at a glance, but it's not cryptographically secure and can be easily reversed by `string-ungarble`. It adds a minor layer of confusion, not security.
+
+3.  *Second Encryption (Signing/Outer Encryption):*
+    - *The *garbled* (obfuscated) string from the previous step is then encrypted *again* using *AES-256* with a *different* key, called the ~signing-key~. This creates the final, external layer of encryption for the token. This layer essentially "signs" and seals the entire encrypted and garbled inner content, further protecting it and making it harder to tamper with.
+
+When decrypting, the process is reversed: the token is first decrypted with the `signing-key`, then ungarbled, then decrypted with the `encryption-key`, and finally Base64-decoded to reveal the original payload.
+
+---------
+
+*  Token Payload
+
+The *token payload* is essentially the data or information that the token carries. When a token is generated, this is the information that gets secured inside it. In this code, the token payload is a list of key-value pairs (an "association list" in Scheme) that includes:
+
+Data about the token: 
+-   token-type ::  Always ~bewaking-token~, identifying what kind of token this is, our stamp of approval!
+-  token-id ::  A unique identifier for this specific token, generated using a UUID (Universally Unique Identifier).
+-  token-created-at ::  The timestamp (time in seconds since the epoch) when the token was created.
+-  token-expires-at ::  The timestamp when the token will become invalid, calculated by adding a specified validity period to the creation time. This ensures tokens have a limited lifespan.
+
+The owner:  
+-  owner-id ::  A unique identifier for the user or entity that owns or is associated with this token.
+-  owner-email ::  The email address of the token owner.
+-  owner-name ::  The name of the token owner.
+-  owner-permissions ::  A list or structure detailing what actions the token owner is allowed to perform.
+
+Before the payload is encrypted, the code checks if these essential fields are present using the ~token-payload-valid?~ function.
+If any are missing, it throws an error, indicating that a valid token cannot be generated without complete owner details.
 
 
-----------------
+------------------------
 
 
 * Licensing
@@ -52,3 +82,15 @@ https://jointhefreeworld.org/blog/articles/personal/jointhefreeworld-code-of-con
 In summary, we foster an inclusive, respectful, and cooperative environment for all contributors and users of this free software project. Inspired by the ideals of the GNU Project, we strive to uphold freedom, equality, and community as guiding principles. We believe that collaboration in a community of mutual respect is essential to creating excellent free software.
 
 -------
+
+
+* Bewaking Project
+
+Contributing to free software is a uniquely beautiful act because it embodies principles of generosity, collaboration, and empowerment.
+
+We welcome everyone to feel invited to the bewaking Project, and encourage active contribution in all forms, to improve it and/or suggest improvements, brainstorm with me, make it more modular/flexible, etc, feel free to contact me <jjbigorra@gmail.com> to chat, discuss or report feedback.
+
+Find here the Backlog and Kanban boards for bewaking: https://lucidplan.jointhefreeworld.org/tickets/bewaking
+
+-----
+

@@ -89,20 +89,15 @@
                                 (token-validity-seconds (* 72 3600)))
   "Generates a secure, encrypted, and Base64-encoded authentication token.
 
-  This function creates a token containing owner details and timestamps, serializes it,
-  and then uses external command-line tools to encrypt and encode it.
-
   WARNING: This implementation has a hard dependency on the `base64` and `openssl`
   command-line utilities being available in the system's PATH.
 
- #:key encryption-key:   The secret key (string) used for AES-256 encryption.
-                          This parameter is required.
- #:key get-owner-details: A thunk (procedure with no arguments) that returns an
-                          association list of the owner's details. Must include at
-                          least an 'id' key.
- #:key token-validity-seconds: The token's lifetime in seconds.
-                                Defaults to 72 hours.
-
+  #:key encryption-key:   The secret key (string) used for AES-256 encryption.
+                           This parameter is required.
+  #:key signing-key:      The signing key (string) used for the final AES-256 encryption.
+                           This parameter is required.
+  #:key get-owner-details: A thunk that returns an the owner's details.
+  #:key token-validity-seconds: The token's lifetime in seconds.
   #:returns: An encrypted and Base64-encoded string representing the token."
 
   (let* ((owner-details (get-owner-details))
@@ -180,7 +175,6 @@
              the token is valid and successfully decoded.
              Otherwise, it raises an error."
 
-  ;; Ensure required arguments are provided.
   (unless token
     (error "decrypt-token: The 'token' was not found in the options list."))
   (unless encryption-key
