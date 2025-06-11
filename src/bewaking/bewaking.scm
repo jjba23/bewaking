@@ -25,15 +25,17 @@
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
   #:use-module (ice-9 rdelim)
-  #:export (generate-token decrypt-token unsafe-generate-token
-                           string-garble string-ungarble
-                           unsafe-decrypt-token token-payload-valid?))
+  #:export (generate-token decrypt-token
+                           unsafe-generate-token
+                           string-garble
+                           string-ungarble
+                           unsafe-decrypt-token
+                           token-payload-valid?))
 
 (define (syscall cmd)
   (let* ((process (open-input-pipe cmd))
          (process-output (get-string-all process)))
     (close-pipe process) process-output))
-
 
 (define (string-garble s)
   (let* ((len (string-length s))
@@ -44,13 +46,14 @@
          (second-half-reversed (string-reverse second-half-original)))
     (string-append second-half-reversed first-half-reversed)))
 
-
 (define (string-ungarble s)
   (let* ((len (string-length s))
          (len-original-first-half (floor (/ len 2)))
          (len-original-second-half (- len len-original-first-half))
-         (reversed-original-second-half (substring s 0 len-original-second-half))
-         (reversed-original-first-half (substring s len-original-second-half len))
+         (reversed-original-second-half (substring s 0
+                                                   len-original-second-half))
+         (reversed-original-first-half (substring s len-original-second-half
+                                                  len))
          (original-second-half (string-reverse reversed-original-second-half))
          (original-first-half (string-reverse reversed-original-first-half)))
     (string-append original-first-half original-second-half)))
@@ -118,8 +121,8 @@
                                 (assoc-ref owner-details
                                            'name))
                     (owner-permissions unquote
-                                 (assoc-ref owner-details
-                                            'permissions))))
+                                       (assoc-ref owner-details
+                                                  'permissions))))
          (_ (unless (token-payload-valid? payload)
               (error "Could not generate token from given payload!")))
 
