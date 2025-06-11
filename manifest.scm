@@ -20,9 +20,7 @@
              (guix utils)
              (guix git-download)
              (guix download)
-             (gnu packages curl)
              (gnu packages guile)
-             (gnu packages nss)
              (gnu packages gnupg)
              (gnu packages guile)
              (gnu packages guile-xyz)
@@ -65,10 +63,5 @@
 (packages->manifest (list (specification->package "make") guile-next
                           guile-gcrypt
                           guile-uuid
-                          nss
-                          nspr
-                          guile-readline
-                          (specification->package "guile-json")
-                          guile-curl
                           guile-ares-rs))
 
