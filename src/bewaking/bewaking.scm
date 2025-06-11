@@ -47,40 +47,83 @@
 
 ;; echo "ENCRYPTED_STRING" | openssl aes-256-cbc -d -pbkdf2 -a -k <password>
 
-(define* (issue-token #:key user-details-provider encryption-key
-                      (token-valid-seconds (* 60 60 48)))
-  (let* ((token-id (generate-string-uuid))
-         (now (current-time))
-         (user-details (user-details-provider))
-         (token-data `((token-type . bewaking-token) (token-id unquote
-                                                               (if (symbol?
-                                                                    token-id)
-                                                                   (symbol->string
-                                                                    token-id)
-                                                                   token-id))
-                       (token-created-at unquote now)
-                       (token-expires-at unquote
-                                         (+ now token-valid-seconds))
-                       (user-id unquote
+;;;
+;;; Secure Token Generation
+;;;
+
+(define* (generate-secure-token #:key encryption-key
+                                (get-user-details (lambda ()
+                                                    '()))
+                                (token-validity-seconds (* 48 3600)))
+  "Generates a secure, encrypted, and Base64-encoded authentication token.
+
+  This function creates a token containing user details and timestamps, serializes it,
+  and then uses external command-line tools to encrypt and encode it.
+
+  WARNING: This implementation has a hard dependency on the `base64` and `openssl`
+  command-line utilities being available in the system's PATH.
+
+ #:key encryption-key:   The secret key (string) used for AES-256 encryption.
+                          This parameter is required.
+  #:key get-user-details: A thunk (procedure with no arguments) that returns an
+                          association list of the user's details. Must include at
+                          least an 'id' key.
+  #:key token-validity-seconds: The token's lifetime in seconds.
+                                Defaults to 48 hours.
+
+  #:returns: An encrypted and Base64-encoded string representing the token."
+
+  (let* ((user-details (get-user-details))
+         (user-id (assoc-ref user-details
+                             'id))
+         (current-timestamp (current-time))
+         (expiration-timestamp (+ current-timestamp token-validity-seconds))
+
+         (payload `((token-type . bewaking-token) (token-id unquote
+                                                            (generate-string-uuid))
+                    (token-created-at unquote current-timestamp)
+                    (token-expires-at unquote expiration-timestamp)
+                    (user-id unquote user-id)
+                    (user-email unquote
                                 (assoc-ref user-details
-                                           'id))
-                       (user-email unquote
-                                   (assoc-ref user-details
-                                              'email))
-                       (user-name unquote
-                                  (assoc-ref user-details
-                                             'name))
-                       (user-permissions unquote
-                                         (assoc-ref user-details
-                                                    'permissions))))
-         (token (with-output-to-string (lambda ()
-                                         (write token-data))))
-         (tt (syscall (format #f "echo '`~a' | base64 --wrap=0" token)))
-         (e-t (syscall (format #f
-                        "echo \"~a\" | openssl enc -aes256 -pbkdf2 -base64 -k ~a"
-                        tt encryption-key)))
-         (clean-ttt (string-replace-substring e-t "\n" "")))
-    clean-ttt))
+                                           'email))
+                    (user-name unquote
+                               (assoc-ref user-details
+                                          'name))
+                    (permissions unquote
+                                 (assoc-ref user-details
+                                            'permissions))))
+
+         ;; Serialize the payload into a string.
+         (payload-string (with-output-to-string (lambda ()
+                                                  (write payload))))
+
+         ;; Base64 encode the payload string.
+         ;; `echo -n` prevents a trailing newline. `--wrap=0` prevents line breaks.
+         (base64-payload (syscall (format #f "echo -n '`~a' | base64 --wrap=0"
+                                          payload-string)))
+
+         ;; Encrypt the Base64 payload using OpenSSL.
+         ;; -aes256: Specifies the AES-256 cipher.
+         ;; -pbkdf2: Uses PBKDF2 to derive the key from the `encryption-key`.
+         ;; -a -A: Base64-encodes the encrypted output for safe transport and all in 1 line.
+         (encrypted-payload (syscall (format #f
+                                      "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
+                                      base64-payload encryption-key)))
+
+         ;; Clean the final token by removing any trailing whitespace from the
+         ;; openssl output, producing the final token.
+         (token (string-trim-right encrypted-payload)))
+    
+    (unless encryption-key
+      (error
+       "generate-secure-token: The #:encryption-key keyword argument is required."))
+
+    (unless user-id
+      (error
+       "generate-secure-token: User details from #:get-user-details must contain an 'id'."))
+
+    token))
 
 (define* (decode-token #:key token encryption-key)
   (let* ((d (syscall (format #f
@@ -94,14 +137,14 @@
 
 (define (trial-run)
   (let* ((start (current-time))
-         (t (issue-token #:encryption-key some-key
-                         #:user-details-provider (lambda ()
-                                                   `((id . "f421188e-3ca2-4d55-a65c-0278cd3f77b1")
-                                                     (email . "jjbigorra@gmail.com")
-                                                     (name . "Joe")
-                                                     (permissions
-                                                      bewaking:write
-                                                      bewaking:read)))))
+         (t (generate-secure-token #:encryption-key some-key
+                                   #:get-user-details (lambda ()
+                                                        `((id . "f421188e-3ca2-4d55-a65c-0278cd3f77b1")
+                                                          (email . "jjbigorra@gmail.com")
+                                                          (name . "Joe")
+                                                          (permissions
+                                                           bewaking:write
+                                                           bewaking:read)))))
          (d (decode-token #:token t
                           #:encryption-key some-key))
          (end (current-time)))
