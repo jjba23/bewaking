@@ -155,8 +155,8 @@ on every field, and returning either #t or #f representing validity status."
    Example:
      (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")
      Returns \"mysecretdata\" "
-  (syscall (format #f "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
-                   payload k)))
+  (syscall (string-append "echo '" payload
+            "' | openssl aes-256-cbc -d -pbkdf2 -a -A -base64 -k '" k "'")))
 
 (define (base16-encode payload)
   (syscall (format #f "echo -n '~a' | xxd -plain | tr -d '\n'" payload)))
@@ -225,6 +225,7 @@ on every field, and returning either #t or #f representing validity status."
          ;; openssl output, producing the final token.
          (token (string-trim-right encrypted-payload))
          (garbled-inner-token (string-garble token))
+
          (signed-token (string-trim-right (encrypt-payload garbled-inner-token
                                            signing-key))))
     
@@ -253,11 +254,12 @@ on every field, and returning either #t or #f representing validity status."
   ;; Decrypt the token using OpenSSL.
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
   (let* ((ddd (string-ungarble (base16-decode token)))
-         (_ (display (format #f "\nddd: ~a\n" ddd)))
          (decrypted-signed-payload (decrypt-payload ddd signing-key))
+         (_ (write decrypted-signed-payload))
          (decrypted-payload (decrypt-payload (string-ungarble
                                               decrypted-signed-payload)
                                              encryption-key))
+         (_ (write decrypted-payload))
 
          ;; Check if decryption produced any output. An empty string often
          ;; indicates a decryption failure (e.g., wrong key).
@@ -268,18 +270,10 @@ on every field, and returning either #t or #f representing validity status."
          ;; Base64-decode the decrypted payload.
          (payload-string (syscall (format #f "echo '~a' | base64 --decode"
                                           decrypted-payload)))
+         (_ (write payload-string))
 
          (payload (eval-string payload-string)))
-    
-    (let ((expiration-timestamp (assoc-ref payload
-                                           'token-expires-at)))
-      (unless (and expiration-timestamp
-                   (number? expiration-timestamp))
-        (error
-         "decrypt-token: Token is invalid. Missing or malformed 'token-expires-at'"))
-
-      (if (> (current-time) expiration-timestamp)
-          (error "decrypt-token: Token has expired.") payload))))
+    payload))
 
 (define* (decrypt-token #:key token encryption-key signing-key)
   "Safely attempts to decrypt a given token.
@@ -328,7 +322,16 @@ on every field, and returning either #t or #f representing validity status."
          (lambda (key . args)
            (display (format #f "Couldn't generate token: ~a: ~a" key args)) #f)))
 
-
 (define* (has-needed-permissions? #:key needed present)
   "Check if needed permissions are a subset of the present (existing) permissions."
   (lset<= equal? needed present))
+
+(define* (is-token-expired? #:key token)
+      (let ((expiration-timestamp (assoc-ref token
+                                           'token-expires-at)))
+      (unless (and expiration-timestamp
+                   (number? expiration-timestamp))
+        (error
+         "decrypt-token: Token is invalid. Missing or malformed 'token-expires-at'"))
+
+      (> (current-time) expiration-timestamp)))
