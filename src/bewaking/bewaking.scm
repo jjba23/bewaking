@@ -34,6 +34,7 @@
                            decrypt-payload
                            base16-encode
                            base16-decode
+                           has-needed-permissions?
                            token-payload-valid?))
 
 (define (syscall cmd)
@@ -326,3 +327,8 @@ on every field, and returning either #t or #f representing validity status."
                                   token-validity-seconds))
          (lambda (key . args)
            (display (format #f "Couldn't generate token: ~a: ~a" key args)) #f)))
+
+
+(define* (has-needed-permissions? #:key needed present)
+  "Check if needed permissions are a subset of the present (existing) permissions."
+  (lset<= equal? needed-permissions present))
