@@ -81,6 +81,21 @@
 
 (define decode-token-test-group
   (test-group "decrypt-token"
+              (test-equal
+               "fails gracefully when encryption key is not correct" #f
+               (decrypt-token #:encryption-key "some-encryption-key"
+                              #:signing-key some-valid-signing-key
+                              #:token some-valid-token))
+              (test-equal "fails gracefully when signing key is not valid" #f
+                          (decrypt-token #:encryption-key
+                                         some-valid-encryption-key
+                                         #:signing-key "some-signing-key"
+                                         #:token some-valid-token))
+              (test-equal "fails gracefully when token is not valid" #f
+                          (decrypt-token #:encryption-key
+                                         some-valid-encryption-key
+                                         #:signing-key some-valid-signing-key
+                                         #:token "some-token"))
               (test-equal "works properly with valid token" #t
                           (let* ((d (decrypt-token #:encryption-key
                                                    some-valid-encryption-key
@@ -98,8 +113,50 @@
                                                     'owner-email)
                                          "someone@jointhefreeworld.org"))))))
 
+(define lossless-token-test-group
+  (test-group "lossless-token"
+              (test-equal "works properly with correct details" #t
+                          (let* ((get-owner-details get-owner-details)
+                                 (t (generate-token #:encryption-key
+                                                    some-valid-encryption-key
+                                                    #:signing-key
+                                                    some-valid-signing-key
+                                                    #:get-owner-details
+                                                    get-owner-details))
+                                 (d (decrypt-token #:encryption-key
+                                                   some-valid-encryption-key
+                                                   #:signing-key
+                                                   some-valid-signing-key
+                                                   #:token t)))
+                            (display (format #f "\nowner-details: ~s\n"
+                                             (get-owner-details)))
+                            (display (format #f "\ngenerate-token: ~a\n" t))
+                            (display (format #f "\ndecoded: ~a\n" d))
+                            (and (equal? (assoc-ref d
+                                                    'owner-id)
+                                         (assoc-ref (get-owner-details)
+                                                    'id))
+                                 (equal? (assoc-ref d
+                                                    'owner-permissions)
+                                         (assoc-ref (get-owner-details)
+                                                    'permissions))
+                                 (equal? (assoc-ref d
+                                                    'owner-email)
+                                         (assoc-ref (get-owner-details)
+                                                    'email)))))))
+
 (define garble-ungarble-string-test-group
   (test-group "garble-ungarble"
+              (test-equal "dlrow"
+                          (string-garble "world"))
+              (test-equal "lrow"
+                          (string-garble "worl"))
+              (test-equal "row"
+                          (string-garble "wor"))
+              (test-equal "ow"
+                          (string-garble "wo"))
+              (test-equal "w"
+                          (string-garble "w"))
               (test-equal "dlrow olleh"
                           (string-garble "hello world"))
               (test-equal "hello world"
@@ -109,4 +166,4 @@
                             (string-ungarble (string-garble some-random-string))))))
 
 (define-test test-bewaking generate-token-test-group
-             garble-ungarble-string-test-group)
+             garble-ungarble-string-test-group lossless-token-test-group)

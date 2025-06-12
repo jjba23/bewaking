@@ -156,13 +156,9 @@ on every field, and returning either #t or #f representing validity status."
                    payload k)))
 
 (define* (unsafe-generate-token #:key encryption-key signing-key
-                                (get-owner-details (lambda ()
-                                                     '()))
+                                get-owner-details
                                 (token-validity-seconds (* 72 3600)))
   "Generates a secure, encrypted, and Base64-encoded authentication token.
-
-  WARNING: This implementation has a hard dependency on the `base64` and `openssl`
-  command-line utilities being available in the system's PATH.
 
   #:key encryption-key:   The secret key (string) used for AES-256 encryption.
                            This parameter is required.
@@ -276,6 +272,18 @@ on every field, and returning either #t or #f representing validity status."
           (error "decrypt-token: Token has expired.") payload))))
 
 (define* (decrypt-token #:key token encryption-key signing-key)
+  "Safely attempts to decrypt a given token.
+   This function acts as a wrapper around `unsafe-decrypt-token`,
+   catching any errors that occur during the decryption process.
+  
+   Args:
+     token: The token string to be decrypted.
+     encryption-key: The key used for encryption.
+     signing-key: The key used for signing/verification.
+  
+   Returns:
+     The decrypted token payload if successful, otherwise `#f`
+     (false) and prints an error message to the console."
   (catch #t
          (lambda ()
            (unsafe-decrypt-token #:token token
@@ -285,9 +293,22 @@ on every field, and returning either #t or #f representing validity status."
            (display (format #f "error decrypting token: ~a: ~a" key args)) #f)))
 
 (define* (generate-token #:key encryption-key signing-key
-                         (get-owner-details (lambda ()
-                                              '()))
+                         get-owner-details
                          (token-validity-seconds (* 72 3600)))
+  "Safely attempts to generate a new token.
+   This function wraps `unsafe-generate-token` to gracefully handle
+   any potential errors during token creation.
+  
+   Args:
+     encryption-key: The key to be used for encrypting the token's payload.
+     signing-key: The key to be used for signing the token.
+     get-owner-details: A thunk that returns a list of details about the token's owner.
+     token-validity-seconds: (Optional) The duration in seconds for which the
+                             token will be valid. Defaults to 72 hours
+  
+   Returns:
+     A newly generated token string if successful, otherwise `#f`
+     (false) and prints an error message to the console."
   (catch #t
          (lambda ()
            (unsafe-generate-token #:encryption-key encryption-key
