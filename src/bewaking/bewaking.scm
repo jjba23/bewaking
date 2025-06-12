@@ -32,7 +32,8 @@
                            unsafe-decrypt-token
                            encrypt-payload
                            decrypt-payload
-                           base16-encode base16-decode
+                           base16-encode
+                           base16-decode
                            token-payload-valid?))
 
 (define (syscall cmd)
@@ -157,13 +158,10 @@ on every field, and returning either #t or #f representing validity status."
                    payload k)))
 
 (define (base16-encode payload)
-  (syscall (format #f
-                   "echo -n '~a' | xxd -plain | tr -d '\n'"
-                   payload )))
+  (syscall (format #f "echo -n '~a' | xxd -plain | tr -d '\n'" payload)))
 
 (define (base16-decode payload)
-  (syscall (format #f "echo '~a' | xxd -plain -revert"
-                   payload )))
+  (syscall (format #f "echo '~a' | xxd -plain -revert" payload)))
 
 (define* (unsafe-generate-token #:key encryption-key signing-key
                                 get-owner-details
@@ -255,8 +253,7 @@ on every field, and returning either #t or #f representing validity status."
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
   (let* ((ddd (string-ungarble (base16-decode token)))
          (_ (display (format #f "\nddd: ~a\n" ddd)))
-         (decrypted-signed-payload (decrypt-payload ddd
-                                                    signing-key))
+         (decrypted-signed-payload (decrypt-payload ddd signing-key))
          (decrypted-payload (decrypt-payload (string-ungarble
                                               decrypted-signed-payload)
                                              encryption-key))
@@ -304,8 +301,7 @@ on every field, and returning either #t or #f representing validity status."
          (lambda (key . args)
            (display (format #f "error decrypting token: ~a: ~a" key args)) #f)))
 
-(define* (generate-token #:key encryption-key signing-key
-                         get-owner-details
+(define* (generate-token #:key encryption-key signing-key get-owner-details
                          (token-validity-seconds (* 72 3600)))
   "Safely attempts to generate a new token.
    This function wraps `unsafe-generate-token` to gracefully handle
