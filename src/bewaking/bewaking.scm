@@ -32,14 +32,40 @@
                            unsafe-decrypt-token
                            encrypt-payload
                            decrypt-payload
+                           base16-encode
+                           base16-decode
+                           has-needed-permissions?
                            token-payload-valid?))
 
 (define (syscall cmd)
+  "Executes a shell command and captures its standard output.
+  
+   #:args
+     cmd: A string representing the shell command to execute.
+  
+   #:returns
+     A string containing the entire standard output of the executed command.
+  
+   #:example
+     (syscall \"ls -l\") ; Returns a string with the directory listing"
   (let* ((process (open-input-pipe cmd))
          (process-output (get-string-all process)))
     (close-pipe process) process-output))
 
 (define (string-garble s)
+  "Garbles a string by splitting it into two halves, reversing each half,
+   and then concatenating the reversed second half with the reversed first half.
+   If the string has an odd length, the first half will be shorter by one character.
+  
+   #:args
+     s: The input string to garble.
+  
+   #:return
+     A new string that is the garbled version of the input string.
+  
+   Example:
+   (string-garble \"abcdefg\") ; Returns \"gfedcba\"
+   (string-garble \"hello world\")   ; Returns \"dlrow olleh\""
   (let* ((len (string-length s))
          (mid-point (floor (/ len 2)))
          (first-half-original (substring s 0 mid-point))
@@ -49,6 +75,18 @@
     (string-append second-half-reversed first-half-reversed)))
 
 (define (string-ungarble s)
+  "Ungarbeles a string that was previously garbled by the `string-garble` function.
+   It reconstructs the original string by reversing the process of `string-garble`.
+  
+   Args:
+     s: The garbled string to ungarble.
+  
+   Returns:
+     The original string before it was garbled.
+  
+   Example:
+   (string-ungarble \"gfedcba\") ; Returns \"abcdefg\"
+   (string-ungarble \"dlrow olleh\")   ; Returns \"hello world\""
   (let* ((len (string-length s))
          (len-original-first-half (floor (/ len 2)))
          (len-original-second-half (- len len-original-first-half))
@@ -60,37 +98,76 @@
          (original-first-half (string-reverse reversed-original-first-half)))
     (string-append original-first-half original-second-half)))
 
-(define (token-payload-valid? token)
+(define (token-payload-valid? payload)
+  "Verify the validity of a token payload, by doing checks
+on every field, and returning either #t or #f representing validity status."
   (and (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-type)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-id)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-created-at)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-expires-at)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'owner-id)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'owner-name)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'owner-permissions)))))
 
+(define (encrypt-payload payload k)
+  "Encrypts a given payload using AES256 encryption with a specified key.
+  It leverages the `openssl` command-line tool.
+  
+   Args:
+     payload: The string to encrypt.
+     k: The encryption key (a string) to use.
+  
+   Returns:
+     A string representing the base64-encoded, AES256-encrypted version of the payload.
+  
+   Example:
+     (encrypt-payload \"mysecretdata\" \"mysecretkey\")
+      Returns a string like \"U2FsdGVkX1+...\" "
+  (syscall (format #f
+                   "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
+                   payload k)))
+
+(define (decrypt-payload payload k)
+  "Decrypts an AES256-encrypted payload using a given key.
+   It relies on the `openssl` command-line tool to perform the decryption.
+  
+   Args:
+     payload: The base64-encoded, AES256-encrypted string to decrypt.
+     k: The decryption key (a string) that was used to encrypt the payload.
+  
+   Returns:
+     The original, decrypted data as a string.
+  
+   Example:
+     (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")
+     Returns \"mysecretdata\" "
+  (syscall (string-append "echo '" payload
+            "' | openssl aes-256-cbc -d -pbkdf2 -a -A -base64 -k '" k "'")))
+
+(define (base16-encode payload)
+  (syscall (format #f "echo -n '~a' | xxd -plain | tr -d '\n'" payload)))
+
+(define (base16-decode payload)
+  (syscall (format #f "echo '~a' | xxd -plain -revert" payload)))
+
 (define* (unsafe-generate-token #:key encryption-key signing-key
-                                (get-owner-details (lambda ()
-                                                     '()))
+                                get-owner-details
                                 (token-validity-seconds (* 72 3600)))
   "Generates a secure, encrypted, and Base64-encoded authentication token.
-
-  WARNING: This implementation has a hard dependency on the `base64` and `openssl`
-  command-line utilities being available in the system's PATH.
 
   #:key encryption-key:   The secret key (string) used for AES-256 encryption.
                            This parameter is required.
@@ -148,19 +225,11 @@
          ;; openssl output, producing the final token.
          (token (string-trim-right encrypted-payload))
          (garbled-inner-token (string-garble token))
+
          (signed-token (string-trim-right (encrypt-payload garbled-inner-token
                                            signing-key))))
     
-    (string-garble signed-token)))
-
-(define (encrypt-payload base64-payload k)
-  (syscall (format #f
-                   "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
-                   base64-payload k)))
-
-(define (decrypt-payload base64-payload k)
-  (syscall (format #f "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
-                   base64-payload k)))
+    (base16-encode (string-garble signed-token))))
 
 (define* (unsafe-decrypt-token #:key token encryption-key signing-key)
   "Decodes and validates a secure token that was created by generate-token.
@@ -176,7 +245,7 @@
              Otherwise, it raises an error."
 
   (unless token
-    (error "decrypt-token: The 'token' was not found in the options list."))
+    (error "decrypt-token: The 'token' was not found."))
   (unless encryption-key
     (error "decrypt-token: The 'encryption-key' was not found."))
   (unless signing-key
@@ -184,11 +253,13 @@
 
   ;; Decrypt the token using OpenSSL.
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
-  (let* ((decrypted-signed-payload (decrypt-payload (string-ungarble token)
-                                                    signing-key))
+  (let* ((ddd (string-ungarble (base16-decode token)))
+         (decrypted-signed-payload (decrypt-payload ddd signing-key))
+         (_ (write decrypted-signed-payload))
          (decrypted-payload (decrypt-payload (string-ungarble
                                               decrypted-signed-payload)
                                              encryption-key))
+         (_ (write decrypted-payload))
 
          ;; Check if decryption produced any output. An empty string often
          ;; indicates a decryption failure (e.g., wrong key).
@@ -199,20 +270,24 @@
          ;; Base64-decode the decrypted payload.
          (payload-string (syscall (format #f "echo '~a' | base64 --decode"
                                           decrypted-payload)))
+         (_ (write payload-string))
 
          (payload (eval-string payload-string)))
-    
-    (let ((expiration-timestamp (assoc-ref payload
-                                           'token-expires-at)))
-      (unless (and expiration-timestamp
-                   (number? expiration-timestamp))
-        (error
-         "decrypt-token: Token is invalid. Missing or malformed 'token-expires-at'"))
-
-      (if (> (current-time) expiration-timestamp)
-          (error "decrypt-token: Token has expired.") payload))))
+    payload))
 
 (define* (decrypt-token #:key token encryption-key signing-key)
+  "Safely attempts to decrypt a given token.
+   This function acts as a wrapper around `unsafe-decrypt-token`,
+   catching any errors that occur during the decryption process.
+  
+   Args:
+     token: The token string to be decrypted.
+     encryption-key: The key used for encryption.
+     signing-key: The key used for signing/verification.
+  
+   Returns:
+     The decrypted token payload if successful, otherwise `#f`
+     (false) and prints an error message to the console."
   (catch #t
          (lambda ()
            (unsafe-decrypt-token #:token token
@@ -221,10 +296,22 @@
          (lambda (key . args)
            (display (format #f "error decrypting token: ~a: ~a" key args)) #f)))
 
-(define* (generate-token #:key encryption-key signing-key
-                         (get-owner-details (lambda ()
-                                              '()))
+(define* (generate-token #:key encryption-key signing-key get-owner-details
                          (token-validity-seconds (* 72 3600)))
+  "Safely attempts to generate a new token.
+   This function wraps `unsafe-generate-token` to gracefully handle
+   any potential errors during token creation.
+  
+   Args:
+     encryption-key: The key to be used for encrypting the token's payload.
+     signing-key: The key to be used for signing the token.
+     get-owner-details: A thunk that returns a list of details about the token's owner.
+     token-validity-seconds: (Optional) The duration in seconds for which the
+                             token will be valid. Defaults to 72 hours
+  
+   Returns:
+     A newly generated token string if successful, otherwise `#f`
+     (false) and prints an error message to the console."
   (catch #t
          (lambda ()
            (unsafe-generate-token #:encryption-key encryption-key
@@ -234,3 +321,17 @@
                                   token-validity-seconds))
          (lambda (key . args)
            (display (format #f "Couldn't generate token: ~a: ~a" key args)) #f)))
+
+(define* (has-needed-permissions? #:key needed present)
+  "Check if needed permissions are a subset of the present (existing) permissions."
+  (lset<= equal? needed present))
+
+(define* (is-token-expired? #:key token)
+      (let ((expiration-timestamp (assoc-ref token
+                                           'token-expires-at)))
+      (unless (and expiration-timestamp
+                   (number? expiration-timestamp))
+        (error
+         "decrypt-token: Token is invalid. Missing or malformed 'token-expires-at'"))
+
+      (> (current-time) expiration-timestamp)))
