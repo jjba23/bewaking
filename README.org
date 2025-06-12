@@ -41,6 +41,10 @@ When decrypting, the process is reversed: the token is first base16-decoded,  de
 
 ---------
 
+[[https://jointhefreeworld.org/static-assets/bewaking/logo-small.jpg]]
+
+---------
+
 *  Token Payload
 
 The *token payload* is essentially the data or information that the token carries. When a token is generated, this is the information that gets secured inside it. In this code, the token payload is a list of key-value pairs (an "association list" in Scheme) that includes:
