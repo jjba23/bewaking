@@ -32,6 +32,7 @@
                            unsafe-decrypt-token
                            encrypt-payload
                            decrypt-payload
+                           base16-encode base16-decode
                            token-payload-valid?))
 
 (define (syscall cmd)
@@ -155,6 +156,15 @@ on every field, and returning either #t or #f representing validity status."
   (syscall (format #f "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
                    payload k)))
 
+(define (base16-encode payload)
+  (syscall (format #f
+                   "echo -n '~a' | xxd -plain | tr -d '\n'"
+                   payload )))
+
+(define (base16-decode payload)
+  (syscall (format #f "echo '~a' | xxd -plain -revert"
+                   payload )))
+
 (define* (unsafe-generate-token #:key encryption-key signing-key
                                 get-owner-details
                                 (token-validity-seconds (* 72 3600)))
@@ -219,7 +229,7 @@ on every field, and returning either #t or #f representing validity status."
          (signed-token (string-trim-right (encrypt-payload garbled-inner-token
                                            signing-key))))
     
-    (string-garble signed-token)))
+    (base16-encode (string-garble signed-token))))
 
 (define* (unsafe-decrypt-token #:key token encryption-key signing-key)
   "Decodes and validates a secure token that was created by generate-token.
@@ -235,7 +245,7 @@ on every field, and returning either #t or #f representing validity status."
              Otherwise, it raises an error."
 
   (unless token
-    (error "decrypt-token: The 'token' was not found in the options list."))
+    (error "decrypt-token: The 'token' was not found."))
   (unless encryption-key
     (error "decrypt-token: The 'encryption-key' was not found."))
   (unless signing-key
@@ -243,7 +253,9 @@ on every field, and returning either #t or #f representing validity status."
 
   ;; Decrypt the token using OpenSSL.
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
-  (let* ((decrypted-signed-payload (decrypt-payload (string-ungarble token)
+  (let* ((ddd (string-ungarble (base16-decode token)))
+         (_ (display (format #f "\nddd: ~a\n" ddd)))
+         (decrypted-signed-payload (decrypt-payload ddd
                                                     signing-key))
          (decrypted-payload (decrypt-payload (string-ungarble
                                               decrypted-signed-payload)
