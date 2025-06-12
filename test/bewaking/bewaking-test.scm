@@ -167,18 +167,33 @@
 
 (define has-needed-permissions-test-group
   (test-group "has-needed-permissions?"
-    (test-equal #f (has-needed-permissions? #:present '() #:needed '(admin)))
-    (test-equal #t (has-needed-permissions? #:present '(admin) #:needed '(admin)))
-    (test-equal #f (has-needed-permissions? #:present '(reader) #:needed '(admin)))
-    (test-equal #t (has-needed-permissions? #:present '(reader admin) #:needed '(admin)))
-    (test-equal #t (has-needed-permissions? #:present '(admin reader) #:needed '(admin reader)))
-    (test-equal #t (has-needed-permissions? #:present '(reader admin) #:needed '(admin reader)))
-    (test-equal #f (has-needed-permissions? #:present '(reader legolas) #:needed '(admin reader)))    
-    (test-equal #f (has-needed-permissions? #:present '() #:needed '(admin reader)))
-    
-    
-    ))
+              (test-equal #f
+                          (has-needed-permissions? #:present '()
+                                                   #:needed '(admin)))
+              (test-equal #t
+                          (has-needed-permissions? #:present '(admin)
+                                                   #:needed '(admin)))
+              (test-equal #f
+                          (has-needed-permissions? #:present '(reader)
+                                                   #:needed '(admin)))
+              (test-equal #t
+                          (has-needed-permissions? #:present '(reader admin)
+                                                   #:needed '(admin)))
+              (test-equal #t
+                          (has-needed-permissions? #:present '(admin reader)
+                                                   #:needed '(admin reader)))
+              (test-equal #t
+                          (has-needed-permissions? #:present '(reader admin)
+                                                   #:needed '(admin reader)))
+              (test-equal #f
+                          (has-needed-permissions? #:present '(reader legolas)
+                                                   #:needed '(admin reader)))
+              (test-equal #f
+                          (has-needed-permissions? #:present '()
+                                                   #:needed '(admin reader)))
+
+              ))
 
 (define-test test-bewaking generate-token-test-group
-  has-all-permissions-test-group
+             has-needed-permissions-test-group
              garble-ungarble-string-test-group lossless-token-test-group)

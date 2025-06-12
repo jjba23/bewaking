@@ -331,4 +331,4 @@ on every field, and returning either #t or #f representing validity status."
 
 (define* (has-needed-permissions? #:key needed present)
   "Check if needed permissions are a subset of the present (existing) permissions."
-  (lset<= equal? needed-permissions present))
+  (lset<= equal? needed present))
