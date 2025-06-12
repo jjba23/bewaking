@@ -35,11 +35,34 @@
                            token-payload-valid?))
 
 (define (syscall cmd)
+  "Executes a shell command and captures its standard output.
+  
+   #:args
+     cmd: A string representing the shell command to execute.
+  
+   #:returns
+     A string containing the entire standard output of the executed command.
+  
+   #:example
+     (syscall \"ls -l\") ; Returns a string with the directory listing"
   (let* ((process (open-input-pipe cmd))
          (process-output (get-string-all process)))
     (close-pipe process) process-output))
 
 (define (string-garble s)
+  "Garbles a string by splitting it into two halves, reversing each half,
+   and then concatenating the reversed second half with the reversed first half.
+   If the string has an odd length, the first half will be shorter by one character.
+  
+   #:args
+     s: The input string to garble.
+  
+   #:return
+     A new string that is the garbled version of the input string.
+  
+   Example:
+   (string-garble \"abcdefg\") ; Returns \"gfedcba\"
+   (string-garble \"hello world\")   ; Returns \"dlrow olleh\""
   (let* ((len (string-length s))
          (mid-point (floor (/ len 2)))
          (first-half-original (substring s 0 mid-point))
@@ -49,6 +72,18 @@
     (string-append second-half-reversed first-half-reversed)))
 
 (define (string-ungarble s)
+  "Ungarbeles a string that was previously garbled by the `string-garble` function.
+   It reconstructs the original string by reversing the process of `string-garble`.
+  
+   Args:
+     s: The garbled string to ungarble.
+  
+   Returns:
+     The original string before it was garbled.
+  
+   Example:
+   (string-ungarble \"gfedcba\") ; Returns \"abcdefg\"
+   (string-ungarble \"dlrow olleh\")   ; Returns \"hello world\""
   (let* ((len (string-length s))
          (len-original-first-half (floor (/ len 2)))
          (len-original-second-half (- len len-original-first-half))
@@ -60,28 +95,65 @@
          (original-first-half (string-reverse reversed-original-first-half)))
     (string-append original-first-half original-second-half)))
 
-(define (token-payload-valid? token)
+(define (token-payload-valid? payload)
+  "Verify the validity of a token payload, by doing checks
+on every field, and returning either #t or #f representing validity status."
   (and (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-type)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-id)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-created-at)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'token-expires-at)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'owner-id)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'owner-name)))
        (not (equal? #f
-                    (assoc-ref token
+                    (assoc-ref payload
                                'owner-permissions)))))
+
+(define (encrypt-payload payload k)
+  "Encrypts a given payload using AES256 encryption with a specified key.
+  It leverages the `openssl` command-line tool.
+  
+   Args:
+     payload: The string to encrypt.
+     k: The encryption key (a string) to use.
+  
+   Returns:
+     A string representing the base64-encoded, AES256-encrypted version of the payload.
+  
+   Example:
+     (encrypt-payload \"mysecretdata\" \"mysecretkey\")
+      Returns a string like \"U2FsdGVkX1+...\" "
+  (syscall (format #f
+                   "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
+                   payload k)))
+
+(define (decrypt-payload payload k)
+  "Decrypts an AES256-encrypted payload using a given key.
+   It relies on the `openssl` command-line tool to perform the decryption.
+  
+   Args:
+     payload: The base64-encoded, AES256-encrypted string to decrypt.
+     k: The decryption key (a string) that was used to encrypt the payload.
+  
+   Returns:
+     The original, decrypted data as a string.
+  
+   Example:
+     (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")
+     Returns \"mysecretdata\" "
+  (syscall (format #f "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
+                   payload k)))
 
 (define* (unsafe-generate-token #:key encryption-key signing-key
                                 (get-owner-details (lambda ()
@@ -152,15 +224,6 @@
                                            signing-key))))
     
     (string-garble signed-token)))
-
-(define (encrypt-payload base64-payload k)
-  (syscall (format #f
-                   "echo -n '~a' | openssl enc -aes256 -pbkdf2 -a -A -k '~a'"
-                   base64-payload k)))
-
-(define (decrypt-payload base64-payload k)
-  (syscall (format #f "echo '~a' | openssl aes-256-cbc -d -pbkdf2 -a -k '~a'"
-                   base64-payload k)))
 
 (define* (unsafe-decrypt-token #:key token encryption-key signing-key)
   "Decodes and validates a secure token that was created by generate-token.
