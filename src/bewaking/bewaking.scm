@@ -34,6 +34,7 @@
                            decrypt-payload
                            base16-encode
                            base16-decode
+                           is-token-expired?
                            has-needed-permissions?
                            token-payload-valid?))
 
