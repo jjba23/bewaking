@@ -70,64 +70,36 @@ If any are missing, it throws an error, indicating that a valid token cannot be 
 
 #+begin_src mermaid
 graph TD
-    subgraph "Token Generation (generate-token)"
-        A[get-owner-details] --> B(Payload Creation)
-        B --> C{token-payload-valid?}
-        C -- Yes --> D[Payload String Conversion]
-        D --> E[Base64 Encode Payload]
-        E --> F[Encrypt Payload encryption-key]
-        F --> G[string-garble inner token]
-        G --> H[Encrypt Garbled Token signing-key]
-        H --> I[base16-encode]
-        I --> J(Generated Token)
-        C -- No --> K(Error: Invalid Payload)
-        F -- Error --> L(Error: Encryption Failed)
-        H -- Error --> M(Error: Signing Failed)
+    subgraph "Token Generation"
+        A[Owner Details] --> B(Create Payload)
+        B --> C{Payload Valid?}
+        C -- Yes --> D[Encrypt encryption-key]
+        D --> E[Garble String]
+        E --> F[Encrypt signing-key]
+        F --> G[Base16 Encode]
+        G --> H(Generated Token)
+        C -- No --> I(Error)
+        D -- Error --> I
+        F -- Error --> I
     end
 
-    subgraph "Token Decryption (decrypt-token)"
-        N[Input Token] --> O[base16-decode]
-        O --> P[string-ungarble]
-        P --> Q[Decrypt Signed Payload signing-key]
-        Q --> R[string-ungarble]
-        R --> S[Decrypt Payload encryption-key]
-        S --> T{Decryption Successful?}
-        T -- Yes --> U[Base64 Decode Payload]
-        U --> V[Parse Payload String]
-        V --> W{Token Validity & Expiration Check}
-        W -- Valid --> X(Decrypted Payload)
-        W -- Expired/Invalid --> Y(Error: Invalid/Expired Token)
-        T -- No --> Z(Error: Decryption Failed)
+    subgraph "Token Decryption"
+        H --> J[Base16 Decode]
+        J --> K[Ungarble String]
+        K --> L[Decrypt signing-key]
+        L --> M[Ungarble String]
+        M --> N[Decrypt encryption-key]
+        N --> O{Decryption Successful?}
+        O -- Yes --> P{Token Valid & Not Expired?}
+        P -- Yes --> Q(Decrypted Payload)
+        P -- No --> R(Error)
+        O -- No --> R
     end
 
-    subgraph "Utility Functions"
-        AA[syscall]
-        BB[string-garble]
-        CC[string-ungarble]
-        DD[encrypt-payload]
-        EE[decrypt-payload]
-        FF[base16-encode]
-        GG[base16-decode]
-        HH[token-payload-valid?]
-        II[has-needed-permissions?]
-        JJ[is-token-expired?]
-    end
+    classDef default fill:#E0F2F7,stroke:#263238,stroke-width:2px;
+    classDef error fill:#FFCDD2,stroke:#B71C1C,stroke-width:2px;
 
-    J --> N
-    F --> DD
-    S --> EE
-    E --> DD
-    H --> DD
-    P --> CC
-    R --> CC
-    O --> GG
-    I --> FF
-    Q --> EE
-
-    classDef default fill:#DDEBF7,stroke:#333,stroke-width:2px;
-    classDef error fill:#F7DDEB,stroke:#F00,stroke-width:2px;
-
-    class K,L,M,Y,Z error;   
+    class I,R error;
 #+end_src
 
 ---------------------
