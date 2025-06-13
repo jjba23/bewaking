@@ -34,10 +34,13 @@ The code employs a multi-layered approach to secure the token:
 3.  *Second Encryption (Signing/Outer Encryption):*
     - *The *garbled* (obfuscated) string from the previous step is then encrypted *again* using *AES-256* with a *different* key, called the ~signing-key~. This creates the final, external layer of encryption for the token. This layer essentially "signs" and seals the entire encrypted and garbled inner content, further protecting it and making it harder to tamper with.
 
-4. *Hexadecimal encoding*:
+4. *Second garbling*
+   For an added layer of indirection and obfuscation we garble the contents again.      
+      
+5. *Hexadecimal encoding*:
    - The signed payload (in base64) is finally encoded into a hexadecimal string (in base16) for maximum portability across systems and for an extra layer of indirection.
 
-When decrypting, the process is reversed: the token is first base16-decoded,  decrypted with the ~signing-key~, then ungarbled, then decrypted with the ~encryption-key~, and finally Base64-decoded to reveal the original payload.
+When decrypting, the process is reversed: the token is first base16-decoded, then ungarbled, decrypted with the ~signing-key~, then ungarbled, then decrypted with the ~encryption-key~, and finally Base64-decoded to reveal the original payload.
 
 ---------
 
