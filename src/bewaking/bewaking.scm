@@ -255,12 +255,9 @@ on every field, and returning either #t or #f representing validity status."
   ;; The `-d` flag is for decryption. The `-a` flag expects base64 input.
   (let* ((ddd (string-ungarble (base16-decode token)))
          (decrypted-signed-payload (decrypt-payload ddd signing-key))
-         (_ (write decrypted-signed-payload))
          (decrypted-payload (decrypt-payload (string-ungarble
                                               decrypted-signed-payload)
                                              encryption-key))
-         (_ (write decrypted-payload))
-
          ;; Check if decryption produced any output. An empty string often
          ;; indicates a decryption failure (e.g., wrong key).
          (_ (if (string-null? decrypted-payload)
