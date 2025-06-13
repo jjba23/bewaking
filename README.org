@@ -94,7 +94,7 @@ class I error;
 #+begin_src mermaid
 graph LR
 
-H --> J[Base16 Decode]
+H[Token] --> J[Base16 Decode]
 J --> K[Ungarble String]
 K --> L[Decrypt with signing-key]
 L --> M[Ungarble String]
