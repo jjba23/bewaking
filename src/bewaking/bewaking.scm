@@ -167,7 +167,7 @@ on every field, and returning either #t or #f representing validity status."
 
 (define* (unsafe-generate-token #:key encryption-key signing-key
                                 get-owner-details
-                                (token-validity-seconds (* 72 3600)))
+                                (token-validity-seconds (* 7 24 3600)))
   "Generates a secure, encrypted, and Base64-encoded authentication token.
 
   #:key encryption-key:   The secret key (string) used for AES-256 encryption.
@@ -268,8 +268,6 @@ on every field, and returning either #t or #f representing validity status."
          ;; Base64-decode the decrypted payload.
          (payload-string (syscall (format #f "echo '~a' | base64 --decode"
                                           decrypted-payload)))
-         (_ (write payload-string))
-
          (payload (eval-string payload-string)))
     payload))
 
@@ -295,7 +293,7 @@ on every field, and returning either #t or #f representing validity status."
            (display (format #f "error decrypting token: ~a: ~a" key args)) #f)))
 
 (define* (generate-token #:key encryption-key signing-key get-owner-details
-                         (token-validity-seconds (* 72 3600)))
+                         (token-validity-seconds (* 7 24 3600)))
   "Safely attempts to generate a new token.
    This function wraps `unsafe-generate-token` to gracefully handle
    any potential errors during token creation.
@@ -304,8 +302,7 @@ on every field, and returning either #t or #f representing validity status."
      encryption-key: The key to be used for encrypting the token's payload.
      signing-key: The key to be used for signing the token.
      get-owner-details: A thunk that returns a list of details about the token's owner.
-     token-validity-seconds: (Optional) The duration in seconds for which the
-                             token will be valid. Defaults to 72 hours
+     token-validity-seconds: (Optional) The duration in seconds for which the token will be valid.
   
    Returns:
      A newly generated token string if successful, otherwise `#f`
