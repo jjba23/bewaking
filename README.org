@@ -72,7 +72,7 @@ If any are missing, it throws an error, indicating that a valid token cannot be 
 ** Token generation
 
 #+begin_src mermaid
-graph TD
+graph LR
     subgraph "Token Generation"
         A[Owner Details] --> B(Create Payload)
         B --> C{Payload Valid?}
@@ -95,7 +95,7 @@ graph TD
 ** Token decryption
 
 #+begin_src mermaid
-graph TD
+graph LR
     subgraph "Token Decryption"
         H --> J[Base16 Decode]
         J --> K[Ungarble String]
