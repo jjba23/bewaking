@@ -28,6 +28,8 @@
              (guix build-system guile)
              (gnu packages linux)
              (gnu packages compression)
+             (gnu packages vim)
+             (gnu packages tls)
              (gnu packages texinfo)
              (gnu packages autotools)
              ((guix licenses)
@@ -61,5 +63,7 @@
       (license license:gpl3+))))
 
 (packages->manifest (list (specification->package "make") guile-next
-                          guile-gcrypt guile-uuid guile-ares-rs))
+                          guile-gcrypt guile-uuid guile-ares-rs
+                          openssl
+                          xxd))
 
