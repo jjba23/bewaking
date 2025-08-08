@@ -22,8 +22,15 @@ variables:
   - &jointhefreeworld_byggsteg_url 'https://byggsteg.jointhefreeworld.org'
   - &main_branch 'trunk'
 
+clone:
+  - name: "⬇️ Clone Git repository"
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 1
+
 steps:
-  get-byggsteg-token-jointhefreeworld:
+  get-byggsteg-token:
+    name: "🔒 Get token @ Byggsteg"
     image: *get_token_image
     when:
       - event: [ push ]
@@ -35,7 +42,8 @@ steps:
         from_secret: "BYGGSTEG_PASSWORD"
       BYGGSTEG_URL: *jointhefreeworld_byggsteg_url
 
-  submit-byggsteg-job-jointhefreeworld:
+  submit-byggsteg-job:
+    name: "💼 Submit job @ Byggsteg"
     image: *submit_job_image
     when:
       - event: [ push ]
@@ -50,6 +58,7 @@ steps:
             (clone-url . "%%CI_REPO_CLONE_URL%%")))
 
   poll-byggsteg-job-jointhefreeworld:
+    name: "🔄 Poll job status @ Byggsteg"
     image: *poll_job_image
     when:
       - event: [ push ]
