@@ -37,9 +37,9 @@ steps:
         branch: [ *main_branch ]
     settings:
       BYGGSTEG_EMAIL:
-        from_secret: "BYGGSTEG_EMAIL"
+        from_secret: BYGGSTEG_EMAIL
       BYGGSTEG_PASSWORD:
-        from_secret: "BYGGSTEG_PASSWORD"
+        from_secret: BYGGSTEG_PASSWORD
       BYGGSTEG_URL: *jointhefreeworld_byggsteg_url
 
   submit-byggsteg-job:
