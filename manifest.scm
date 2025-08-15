@@ -61,6 +61,8 @@ between binary and hex-and-dash string UUIDs are included.")
 
 (packages->manifest (list (specification->package "make") guile-next
                           guile-gcrypt guile-uuid guile-ares-rs
+                          guile-documenta
+                          texinfo
                           openssl
                           xxd))
 

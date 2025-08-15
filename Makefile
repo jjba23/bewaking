@@ -15,7 +15,11 @@
 # You should have received a copy of the Lesser GNU General Public License
 # along with bewaking.  If not, see <https://www.gnu.org/licenses/>.
 
-.PHONY: test
+.PHONY: test docs
+
+API_DOCS_CSS_URL:="https://jointhefreeworld.org/static-assets/api-docs/css/style.css"
+DEPLOY_WWW="/srv/http/jointhefreeworld.org"
+
 
 # Logging helpers
 
@@ -43,3 +47,18 @@ test:
 		guile -L ./src \
 		-L ./test \
 		-c "((@ (bewaking test-runners) run-project-tests))"
+
+# docs: Generate technical API documentation
+docs:
+	rm -rfv doc
+	guix shell -m manifest.scm -- documenta api ./src/bewaking
+	guix shell -m manifest.scm -- texi2any -v --html \
+		--css-ref=$(API_DOCS_CSS_URL) ./doc/api/index.texi
+	mv ./index ./doc/api-dist
+
+# deploy: Deploys the documentation to a web server directory.
+deploy: docs
+	rm -rfv $(DEPLOY_WWW)/api-docs/bewaking
+	mkdir -p $(DEPLOY_WWW)/api-docs/bewaking
+	mv doc/api-dist/* $(DEPLOY_WWW)/api-docs/bewaking/
+	rm -rfv doc

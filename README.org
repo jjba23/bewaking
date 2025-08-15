@@ -18,6 +18,10 @@ This project provides a DSL to be used for Authorization and Authentication for 
 
 We rely on the external tools ~xxd~, ~openssl~ and ~base64~ available on the system to perform its cryptographic heavy lifting.
 
+You can find the technical Guile Scheme API documentation for Bewaking here:
+
+https://jointhefreeworld.org/api-docs/bewaking/API.html
+
 -----------------
 
 * Double Encryption and Obfuscation
