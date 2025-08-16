@@ -108,6 +108,16 @@ If any are missing, it throws an error, indicating that a valid token cannot be 
 
 ------------------------
 
+* Projects that use Bewaking
+
+- WikiMusic :: https://codeberg.org/jjba23/wikimusic
+- LucidPlan :: https://codeberg.org/jjba23/lucidplan
+- Byggsteg :: https://codeberg.org/jjba23/byggsteg
+- Byggsteg CI/CD Woodpecker Integration :: https://codeberg.org/jjba23/byggsteg-woodpecker  
+
+
+------------------------    
+
 * Visualizing the process
 
 ** Token generation
