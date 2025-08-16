@@ -24,6 +24,26 @@ https://jointhefreeworld.org/api-docs/bewaking/API.html
 
 -----------------
 
+* Introduction
+
+bewaking's core functionality is generating encrypted tokens and decrypting them and includes a simple permission functionality.
+
+For flexibility and using the power of Lisp, a user's token payload is accepted as thunk argument (lambda with no parameters). Then you can call ~generate-token~ with an encryption key (1st seal), signing key (2nd seal) and a thunk like this. These details will later be used by bewaking in the token.
+
+
+#+begin_src scheme
+(define get-owner-details
+  (lambda ()
+    `((id . "144959d3-7a8e-455e-b608-31e35145a2fa")
+      (email . "someone@jointhefreeworld.org")
+      (name . "Joe")
+      (permissions byggsteg:modify-permissions
+                   byggsteg:job-create
+                   byggsteg:user-create
+                   byggsteg:user-delete))))
+
+#+end_src
+
 * Double Encryption and Obfuscation
 
 The code employs a multi-layered approach to secure the token:
