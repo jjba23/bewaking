@@ -33,7 +33,7 @@ steps:
     name: "🔒 Get token @ Byggsteg"
     image: *get_token_image
     when:
-      - event: [ push pr ]
+      - event: [ push ]
     settings:
       BYGGSTEG_EMAIL:
         from_secret: BYGGSTEG_EMAIL
@@ -45,7 +45,7 @@ steps:
     name: "💼 Submit PR job @ Byggsteg"
     image: *submit_job_image
     when:
-      - event: [ push pr ]
+      - event: [ push ]
     settings:
       BYGGSTEG_URL: *jointhefreeworld_byggsteg_url
       BYGGSTEG_JOB_CODE: |
@@ -74,6 +74,6 @@ steps:
     name: "🔄 Poll job status @ Byggsteg"
     image: *poll_job_image
     when:
-      - event: [ push pr ]
+      - event: [ push ]
     settings:
       BYGGSTEG_URL: *jointhefreeworld_byggsteg_url
