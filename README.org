@@ -110,11 +110,11 @@ If any are missing, it throws an error, indicating that a valid token cannot be 
 
 * Projects that use Bewaking
 
-- WikiMusic :: https://codeberg.org/jjba23/wikimusic
-- LucidPlan :: https://codeberg.org/jjba23/lucidplan
-- Byggsteg :: https://codeberg.org/jjba23/byggsteg
+- WikiMusic (Musical CMS and platform) :: https://codeberg.org/jjba23/wikimusic
+- LucidPlan (Project Management) :: https://codeberg.org/jjba23/lucidplan
+- Byggsteg (CI/CD orchestrator) :: https://codeberg.org/jjba23/byggsteg
 - Byggsteg CI/CD Woodpecker Integration :: https://codeberg.org/jjba23/byggsteg-woodpecker  
-
+- Pingwing (Mail Central) :: https://codeberg.org/jjba23/pingwing
 
 ------------------------    
 
