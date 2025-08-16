@@ -44,6 +44,21 @@ For flexibility and using the power of Lisp, a user's token payload is accepted 
 
 #+end_src
 
+The data that will actually be encrypted looks like this (and this is also the data you get from decrypting a token:
+
+#+begin_src scheme
+'((token-data
+   (token-type . "bewaking-token")
+   (token-id . "123e4567-e89b-12d3-a456-426655440000")
+   (token-created-at . 1672531200)
+   (token-expires-at . 1672534800))
+  (owner-data
+   (owner-id . "user-1a2b3c4d")
+   (owner-email . "jane.doe@example.com")
+   (owner-name . "Jane Doe")
+   (owner-permissions (read-only access-files manage-profile))))
+#+end_src
+
 * Double Encryption and Obfuscation
 
 The code employs a multi-layered approach to secure the token:
