@@ -46,7 +46,7 @@ test:
 	guix shell -m manifest.scm -- \
 		guile -L ./src \
 		-L ./test \
-		-c "((@ (bewaking test-runners) run-project-tests))"
+		-c "((@ (veritas runner) run-tests))"
 
 # docs: Generate technical API documentation
 docs:
