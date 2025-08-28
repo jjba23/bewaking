@@ -26,6 +26,7 @@
              (gnu packages guile-xyz)
              (gnu packages pkg-config)
              (guix build-system guile)
+             (gnu packages rust-apps)
              (gnu packages linux)
              (gnu packages compression)
              (gnu packages vim)
@@ -92,6 +93,7 @@ between binary and hex-and-dash string UUIDs are included.")
                           guile-gcrypt guile-uuid guile-ares-rs
                           guile-documenta
                           texinfo
+                          watchexec
                           openssl
                           xxd))
 
