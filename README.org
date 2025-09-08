@@ -11,7 +11,9 @@ If you like my work, please support me by [[https://bmc.link/jjbigorra][buying m
 
 * About bewaking
 
-This project provides a DSL to be used for Authorization and Authentication for your Guile Scheme projects.
+This project provides functionalities to (double) encrypt and decrypt data with custom obfuscation technology as well.
+
+Also it provides a DSL to be used for Authorization and Authentication for your Guile Scheme projects with a simple user permission system (useful for in auth tokens in web applications for example).
 
 /bewaking/ means surveillance in the Dutch language.
 
