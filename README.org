@@ -1,6 +1,6 @@
 #+title: Bewaking
 
-[[https://jointhefreeworld.org/ggg/dist/scheme-guile.svg]] [[https://jointhefreeworld.org/ggg/dist/gnu-guix.svg]]  
+[[https://jointhefreeworld.org/ggg/dist/scheme-guile.svg]] [[https://jointhefreeworld.org/ggg/dist/gnu-guix.svg]]
 [[https://jointhefreeworld.org/ggg/dist/license-lgpl3+.svg]]    [[https://jointhefreeworld.org/ggg/dist/license-fdl13+.svg]]
 
 bewaking provides functionalities to (double) encrypt and decrypt data, aided by a custom obfuscation algorithm.
@@ -74,8 +74,8 @@ The code employs a multi-layered approach to secure the token:
     - *The *garbled* (obfuscated) string from the previous step is then encrypted *again* using *AES-256* with a *different* key, called the ~signing-key~. This creates the final, external layer of encryption for the token. This layer essentially "signs" and seals the entire encrypted and garbled inner content, further protecting it and making it harder to tamper with.
 
 4. *Second garbling*
-   For an added layer of indirection and obfuscation we garble the contents again.      
-      
+   For an added layer of indirection and obfuscation we garble the contents again.
+
 5. *Hexadecimal encoding*:
    - The signed payload (in base64) is finally encoded into a hexadecimal string (in base16) for maximum portability across systems and for an extra layer of indirection.
 
@@ -91,13 +91,13 @@ When decrypting, the process is reversed: the token is first base16-decoded, the
 
 The *token payload* is essentially the data or information that the token carries. When a token is generated, this is the information that gets secured inside it. In this code, the token payload is a list of key-value pairs (an "association list" in Scheme) that includes:
 
-Data about the token: 
+Data about the token:
 -   token-type ::  Always ~bewaking-token~, identifying what kind of token this is, our stamp of approval!
 -  token-id ::  A unique identifier for this specific token, generated using a UUID (Universally Unique Identifier).
 -  token-created-at ::  The timestamp (time in seconds since the epoch) when the token was created.
 -  token-expires-at ::  The timestamp when the token will become invalid, calculated by adding a specified validity period to the creation time. This ensures tokens have a limited lifespan.
 
-The owner:  
+The owner:
 -  owner-id ::  A unique identifier for the user or entity that owns or is associated with this token.
 -  owner-email ::  The email address of the token owner.
 -  owner-name ::  The name of the token owner.
@@ -114,9 +114,9 @@ If any are missing, it throws an error, indicating that a valid token cannot be 
 - WikiMusic (Musical CMS and platform) :: https://codeberg.org/jjba23/wikimusic
 - LucidPlan (Project Management) :: https://codeberg.org/jjba23/lucidplan
 - Byggsteg (CI/CD orchestrator) :: https://codeberg.org/jjba23/byggsteg
-- Byggsteg CI/CD Woodpecker Integration :: https://codeberg.org/jjba23/byggsteg-woodpecker  
+- Byggsteg CI/CD Woodpecker Integration :: https://codeberg.org/jjba23/byggsteg-woodpecker
 
-------------------------    
+------------------------
 
 * Visualizing the process
 
@@ -130,7 +130,7 @@ B --> C{Payload Valid?}
 C -- Yes --> D[Encrypt with encryption-key]
 D --> E[Garble String]
 E --> F[Encrypt with signing-key]
-F --> G[Garble String]    
+F --> G[Garble String]
 G --> H[Base16 Encode]
 H --> J(Generated Token)
 C -- No --> I(Error)
@@ -171,6 +171,18 @@ The documentation and examples, including this document, which are provided with
 
 https://www.gnu.org/licenses/fdl-1.3.html
 
+
+----------------------
+
+* AI Policy
+
+This project adheres to the jointhefreeworld AI policy. Find it here:
+
+https://jointhefreeworld.org/blog/articles/personal/jointhefreeworld-ai-policy/index.html
+
+In summary, AI should assist human creativity and problem-solving, never replace human reasoning. We strongly favor human-authored code. While tools like Large Language Models (LLMs) and interactive chatbots can be beneficial for reviewing, refactoring small functions, or acting as a sounding board, they should be used with moderation. Contributors must maintain a deep, comprehensive understanding of the task at hand.
+
+
 --------------
 
 * Code of conduct
@@ -193,5 +205,3 @@ We welcome everyone to feel invited to the bewaking Project, and encourage activ
 Find here the Backlog and Kanban boards for bewaking: https://lucidplan.jointhefreeworld.org/tickets/bewaking
 
 -----
-
-
