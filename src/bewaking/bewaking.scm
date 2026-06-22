@@ -17,14 +17,10 @@
 
 (define-module (bewaking bewaking)
   #:use-module (uuid generate)
-  #:use-module (ice-9 match)
   #:use-module (ice-9 format)
-  #:use-module (ice-9 string-fun)
   #:use-module (srfi srfi-1)
-  #:use-module (ice-9 iconv)
   #:use-module (ice-9 popen)
   #:use-module (ice-9 textual-ports)
-  #:use-module (ice-9 rdelim)
   #:export (generate-token decrypt-token
                            unsafe-generate-token
                            string-garble
@@ -40,13 +36,13 @@
 
 (define (syscall cmd)
   "Executes a shell command and captures its standard output.
-  
+
    #:args
      cmd: A string representing the shell command to execute.
-  
+
    #:returns
      A string containing the entire standard output of the executed command.
-  
+
    #:example
      (syscall \"ls -l\") ; Returns a string with the directory listing"
   (let* ((process (open-input-pipe cmd))
@@ -57,13 +53,13 @@
   "Garbles a string by splitting it into two halves, reversing each half,
    and then concatenating the reversed second half with the reversed first half.
    If the string has an odd length, the first half will be shorter by one character.
-  
+
    #:args
      s: The input string to garble.
-  
+
    #:return
      A new string that is the garbled version of the input string.
-  
+
    Example:
    (string-garble \"abcdefg\") ; Returns \"gfedcba\"
    (string-garble \"hello world\")   ; Returns \"dlrow olleh\""
@@ -78,13 +74,13 @@
 (define (string-ungarble s)
   "Ungarbeles a string that was previously garbled by the `string-garble` function.
    It reconstructs the original string by reversing the process of `string-garble`.
-  
+
    Args:
      s: The garbled string to ungarble.
-  
+
    Returns:
      The original string before it was garbled.
-  
+
    Example:
    (string-ungarble \"gfedcba\") ; Returns \"abcdefg\"
    (string-ungarble \"dlrow olleh\")   ; Returns \"hello world\""
@@ -127,14 +123,14 @@ on every field, and returning either #t or #f representing validity status."
 (define (encrypt-payload payload k)
   "Encrypts a given payload using AES256 encryption with a specified key.
   It leverages the `openssl` command-line tool.
-  
+
    Args:
      payload: The string to encrypt.
      k: The encryption key (a string) to use.
-  
+
    Returns:
      A string representing the base64-encoded, AES256-encrypted version of the payload.
-  
+
    Example:
      (encrypt-payload \"mysecretdata\" \"mysecretkey\")
       Returns a string like \"U2FsdGVkX1+...\" "
@@ -145,14 +141,14 @@ on every field, and returning either #t or #f representing validity status."
 (define (decrypt-payload payload k)
   "Decrypts an AES256-encrypted payload using a given key.
    It relies on the `openssl` command-line tool to perform the decryption.
-  
+
    Args:
      payload: The base64-encoded, AES256-encrypted string to decrypt.
      k: The decryption key (a string) that was used to encrypt the payload.
-  
+
    Returns:
      The original, decrypted data as a string.
-  
+
    Example:
      (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")
      Returns \"mysecretdata\" "
@@ -275,12 +271,12 @@ on every field, and returning either #t or #f representing validity status."
   "Safely attempts to decrypt a given token.
    This function acts as a wrapper around `unsafe-decrypt-token`,
    catching any errors that occur during the decryption process.
-  
+
    Args:
      token: The token string to be decrypted.
      encryption-key: The key used for encryption.
      signing-key: The key used for signing/verification.
-  
+
    Returns:
      The decrypted token payload if successful, otherwise `#f`
      (false) and prints an error message to the console."
@@ -297,13 +293,13 @@ on every field, and returning either #t or #f representing validity status."
   "Safely attempts to generate a new token.
    This function wraps `unsafe-generate-token` to gracefully handle
    any potential errors during token creation.
-  
+
    Args:
      encryption-key: The key to be used for encrypting the token's payload.
      signing-key: The key to be used for signing the token.
      get-owner-details: A thunk that returns a list of details about the token's owner.
      token-validity-seconds: (Optional) The duration in seconds for which the token will be valid.
-  
+
    Returns:
      A newly generated token string if successful, otherwise `#f`
      (false) and prints an error message to the console."
@@ -322,11 +318,11 @@ on every field, and returning either #t or #f representing validity status."
   (lset<= equal? needed present))
 
 (define* (is-token-expired? #:key token)
-      (let ((expiration-timestamp (assoc-ref token
-                                           'token-expires-at)))
-      (unless (and expiration-timestamp
-                   (number? expiration-timestamp))
-        (error
-         "decrypt-token: Token is invalid. Missing or malformed 'token-expires-at'"))
+  (let ((expiration-timestamp (assoc-ref token
+                                         'token-expires-at)))
+    (unless (and expiration-timestamp
+                 (number? expiration-timestamp))
+      (error
+       "decrypt-token: Token is invalid. Missing or malformed 'token-expires-at'"))
 
-      (> (current-time) expiration-timestamp)))
+    (> (current-time) expiration-timestamp)))
