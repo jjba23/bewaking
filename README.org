@@ -176,8 +176,6 @@ https://www.gnu.org/licenses/fdl-1.3.html
 
 * AI Policy
 
-* AI Policy
-
 This project adheres to the [[https://jointhefreeworld.org/blog/articles/personal/jointhefreeworld-ai-policy/index.html][jointhefreeworld AI (Artificial Intelligence) policy]].
 
 Our core principle is simple: *AI should assist human creativity and problem-solving, never replace human reasoning.*
