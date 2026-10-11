@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# bewaking command-line interface
+#
+# Runs the (bewaking cli) module against this checkout's src/ directory, so the
+# CLI works straight from the repository without installation:
+#
+#   ./bin/bewaking help
+#   ./bin/bewaking password generate --length 32
+
+set -euo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+exec guile -L "$here/src" \
+  -c '(exit ((@ (bewaking cli) run) (cdr (command-line))))' "$@"

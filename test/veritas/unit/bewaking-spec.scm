@@ -18,6 +18,7 @@
 (define-module (veritas unit bewaking-spec)
   #:use-module (veritas veritas)
   #:use-module (bewaking bewaking)
+  #:use-module (ice-9 string-fun)
   #:use-module (uuid generate))
 
 (set! *random-state*
@@ -184,7 +185,442 @@
 
                )))
 
+(define is-token-expired-suite
+  (suite "Token expiry"
+         (test "is-token-expired?"
+               (assert-true (is-token-expired? #:token '((token-expires-at . 1)))
+                            #:name "a token whose expiry is in the past is expired")
+               (assert-false (is-token-expired? #:token
+                                                `((token-expires-at . ,(+ (current-time)
+                                                                          3600))))
+                             #:name "a token whose expiry is in the future is not expired")
+               (assert-false (is-token-expired? #:token
+                                                '((token-expires-at . 999999999999)))
+                             #:name "a far-future token is not expired")
+               (assert-error (lambda ()
+                               (is-token-expired? #:token '((token-id . "x"))))
+                             #:name "a missing token-expires-at raises an error")
+               (assert-error (lambda ()
+                               (is-token-expired? #:token
+                                                  '((token-expires-at . "soon"))))
+                             #:name "a malformed token-expires-at raises an error"))))
+
+(define token-helpers-suite
+  (suite "Token validity helpers"
+         (test "token-remaining-seconds and token-valid?"
+               (assert-true (> (token-remaining-seconds
+                                #:token `((token-expires-at . ,(+ (current-time)
+                                                                 100))))
+                               0)
+                            #:name "remaining seconds is positive for a live token")
+               (assert-true (< (token-remaining-seconds
+                                #:token '((token-expires-at . 1))) 0)
+                            #:name "remaining seconds is negative for an expired token")
+               (assert-error (lambda ()
+                               (token-remaining-seconds #:token '()))
+                             #:name "a missing expiry raises an error")
+               (let* ((t (generate-token #:encryption-key
+                                         some-valid-encryption-key
+                                         #:signing-key some-valid-signing-key
+                                         #:get-owner-details get-owner-details))
+                      (d (decrypt-token #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key
+                                        #:token t)))
+                 (assert-true (token-valid? #:token d)
+                              #:name "a freshly generated token is valid")
+                 (assert-false (is-token-expired? #:token d)
+                               #:name "a freshly generated token is not expired")))))
+
+(define generic-object-suite
+  (suite "Generic object encryption"
+         (test "encrypt-object and decrypt-object"
+               (let ((payload '((user . "joe")
+                                (age . 42)
+                                (roles admin editor)
+                                (tags "a" "b")
+                                (nested . ((x . 1) (y . 2))))))
+                 (let ((sealed (encrypt-object #:payload payload
+                                               #:encryption-key
+                                               some-valid-encryption-key
+                                               #:signing-key
+                                               some-valid-signing-key)))
+                   (assert-true (and (string? sealed)
+                                     (> (string-length sealed) 0))
+                                #:name "sealing produces a non-empty string")
+                   (assert-equal #:expect payload
+                                 #:got (decrypt-object #:object sealed
+                                                       #:encryption-key
+                                                       some-valid-encryption-key
+                                                       #:signing-key
+                                                       some-valid-signing-key)
+                                 #:name "round-trips an arbitrary alist payload")
+                   (assert-false (decrypt-object #:object sealed
+                                                 #:encryption-key
+                                                 some-valid-encryption-key
+                                                 #:signing-key
+                                                 "wrong-signing-key")
+                                 #:name "fails gracefully with a wrong signing key")))
+               (assert-equal #:expect "just a string"
+                             #:got (decrypt-object #:object
+                                                   (encrypt-object #:payload
+                                                                   "just a string"
+                                                                   #:encryption-key
+                                                                   some-valid-encryption-key
+                                                                   #:signing-key
+                                                                   some-valid-signing-key)
+                                                   #:encryption-key
+                                                   some-valid-encryption-key
+                                                   #:signing-key
+                                                   some-valid-signing-key)
+                             #:name "round-trips a plain string payload")
+               (assert-equal #:expect 1234
+                             #:got (decrypt-object #:object
+                                                   (encrypt-object #:payload 1234
+                                                                   #:encryption-key
+                                                                   some-valid-encryption-key
+                                                                   #:signing-key
+                                                                   some-valid-signing-key)
+                                                   #:encryption-key
+                                                   some-valid-encryption-key
+                                                   #:signing-key
+                                                   some-valid-signing-key)
+                             #:name "round-trips a number payload")
+               (assert-equal #:expect '(1 2 3)
+                             #:got (decrypt-object #:object
+                                                   (encrypt-object #:payload '(1 2 3)
+                                                                   #:encryption-key
+                                                                   some-valid-encryption-key
+                                                                   #:signing-key
+                                                                   some-valid-signing-key)
+                                                   #:encryption-key
+                                                   some-valid-encryption-key
+                                                   #:signing-key
+                                                   some-valid-signing-key)
+                             #:name "round-trips a list payload"))))
+
+(define (tamper-hex-at s i)
+  "Return @var{s} with the character at index @var{i} replaced by a different
+   hexadecimal digit, to simulate tampering."
+  (let* ((ch (string-ref s i))
+         (replacement (if (char=? ch #\0) #\1 #\0))
+         (prefix (substring s 0 i))
+         (suffix (substring s (+ i 1) (string-length s))))
+    (string-append prefix (string replacement) suffix)))
+
+(define (sealed-envelope-example)
+  (seal-envelope #:plaintext "top secret payload"
+                 #:encryption-key some-valid-encryption-key
+                 #:signing-key some-valid-signing-key))
+
+(define (envelope-round-trip-value)
+  (open-envelope #:sealed (sealed-envelope-example)
+                 #:encryption-key some-valid-encryption-key
+                 #:signing-key some-valid-signing-key))
+
+(define (raises? thunk)
+  "Return #t when calling the zero-argument @var{thunk} raises, else #f."
+  (catch #t (lambda () (thunk) #f) (lambda args #t)))
+
+(define (tampered-envelope-rejected?)
+  (let ((sealed (sealed-envelope-example)))
+    (raises? (lambda ()
+               (open-envelope #:sealed (tamper-hex-at
+                                        sealed
+                                        (quotient (string-length sealed) 2))
+                              #:encryption-key some-valid-encryption-key
+                              #:signing-key some-valid-signing-key)))))
+
+(define (wrong-mac-key-rejected?)
+  (raises? (lambda ()
+             (open-envelope #:sealed (sealed-envelope-example)
+                            #:encryption-key some-valid-encryption-key
+                            #:signing-key some-valid-signing-key
+                            #:mac-key "wrong-mac-key"))))
+
+(define (tampered-token-rejected?)
+  (let* ((t (generate-token #:encryption-key some-valid-encryption-key
+                            #:signing-key some-valid-signing-key
+                            #:get-owner-details get-owner-details))
+         (tampered (tamper-hex-at t (quotient (string-length t) 2))))
+    (not (decrypt-token #:token tampered
+                        #:encryption-key some-valid-encryption-key
+                        #:signing-key some-valid-signing-key))))
+
+(define (tampered-object-rejected?)
+  (let* ((sealed (encrypt-object #:payload '((a . 1))
+                                 #:encryption-key some-valid-encryption-key
+                                 #:signing-key some-valid-signing-key))
+         (tampered (tamper-hex-at sealed (quotient (string-length sealed) 2))))
+    (not (decrypt-object #:object tampered
+                         #:encryption-key some-valid-encryption-key
+                         #:signing-key some-valid-signing-key))))
+
+(define (keyring-rotation-works?)
+  (let* ((keyring '(("2026a" (encryption-key . "enc-2026a")
+                             (signing-key . "sig-2026a"))
+                    ("2025b" (encryption-key . "enc-2025b")
+                             (signing-key . "sig-2025b"))))
+         (sealed (encrypt-object #:payload '((v . new))
+                                 #:keyring keyring
+                                 #:key-id "2026a"))
+         (other-keyring '(("2025b" (encryption-key . "enc-2025b")
+                                   (signing-key . "sig-2025b")))))
+    (and (and (string-contains sealed "BWK2.2026a.") #t)
+         (equal? (decrypt-object #:object sealed #:keyring keyring) '((v . new)))
+         (not (decrypt-object #:object sealed #:keyring other-keyring))
+         (not (decrypt-object #:object sealed #:keyring '())))))
+
+(define sealed-envelope-suite
+  (suite "Sealed envelope (versioned, authenticated)"
+         (test "seal-envelope and open-envelope"
+               (assert-true (sealed-envelope? (sealed-envelope-example))
+                            #:name "the result is a versioned envelope")
+               (assert-true (and (string-prefix? "BWK2."
+                                                 (sealed-envelope-example))
+                                 #t)
+                            #:name "the envelope starts with the version tag")
+               (assert-equal #:expect "BWK2" #:got seal-format-version
+                             #:name "the module exposes the current format version")
+               (assert-equal #:expect "BWK1" #:got legacy-seal-format-version
+                             #:name "the module exposes the legacy format version")
+               (assert-equal #:expect "top secret payload"
+                             #:got (envelope-round-trip-value)
+                             #:name "the plaintext round-trips")
+               (assert-true (tampered-envelope-rejected?)
+                            #:name "a tampered envelope fails the integrity check")
+               (assert-true (wrong-mac-key-rejected?)
+                            #:name "a wrong MAC key fails the integrity check"))
+         (test "tokens and objects are envelopes and reject tampering"
+               (assert-true (sealed-envelope?
+                             (generate-token #:encryption-key
+                                             some-valid-encryption-key
+                                             #:signing-key
+                                             some-valid-signing-key
+                                             #:get-owner-details
+                                             get-owner-details))
+                            #:name "generated tokens are enveloped")
+               (assert-true (sealed-envelope?
+                             (encrypt-object #:payload '((a . 1))
+                                             #:encryption-key
+                                             some-valid-encryption-key
+                                             #:signing-key
+                                             some-valid-signing-key))
+                            #:name "sealed objects are enveloped")
+               (assert-true (tampered-token-rejected?)
+                            #:name "a tampered token is rejected")
+               (assert-true (tampered-object-rejected?)
+                            #:name "a tampered object is rejected"))
+         (test "legacy tokens remain readable"
+               (assert-false (sealed-envelope? some-valid-token)
+                             #:name "the legacy fixture is not an envelope")
+               (assert-true (and (decrypt-token #:encryption-key
+                                                some-valid-encryption-key
+                                                #:signing-key
+                                                some-valid-signing-key
+                                                #:token some-valid-token)
+                                 #t)
+                            #:name "the legacy fixture still decrypts"))
+         (test "key rotation with a keyring"
+               (assert-true (keyring-rotation-works?)
+                            #:name "a keyring seals and opens by key id"))
+         (test "the requested key id is embedded in generated tokens"
+               (assert-true (and (string-contains
+                                  (generate-token #:encryption-key
+                                                  some-valid-encryption-key
+                                                  #:signing-key
+                                                  some-valid-signing-key
+                                                  #:key-id "rotate-1"
+                                                  #:get-owner-details
+                                                  get-owner-details)
+                                  "BWK2.rotate-1.")
+                                 #t)
+                            #:name "the token carries the key id"))))
+
+;; ====== Envelope metadata (rotation policy and audit) ======
+
+(define (metadata-field sealed field)
+  (assoc-ref (envelope-metadata #:sealed sealed) field))
+
+(define (sealed-with-metadata)
+  (seal-envelope #:plaintext "ttl payload"
+                 #:encryption-key some-valid-encryption-key
+                 #:signing-key some-valid-signing-key
+                 #:key-id "2026a" #:created-at 1000 #:ttl-seconds 3600))
+
+(define (token-sealed-with-expiry)
+  (generate-token #:encryption-key some-valid-encryption-key
+                  #:signing-key some-valid-signing-key
+                  #:get-owner-details get-owner-details
+                  #:expires-at 1000))
+
+(define (expired-token-rejected?)
+  (not (decrypt-token #:token (token-sealed-with-expiry)
+                      #:encryption-key some-valid-encryption-key
+                      #:signing-key some-valid-signing-key)))
+
+(define (expired-object-rejected?)
+  (let ((sealed (encrypt-object #:payload '((a . 1))
+                                #:encryption-key some-valid-encryption-key
+                                #:signing-key some-valid-signing-key
+                                #:expires-at 1000)))
+    (not (decrypt-object #:object sealed
+                         #:encryption-key some-valid-encryption-key
+                         #:signing-key some-valid-signing-key))))
+
+(define (tampered-created-at-rejected?)
+  (raises?
+   (lambda ()
+     (open-envelope #:sealed (string-replace-substring (sealed-with-metadata)
+                                                       "1000" "9000")
+                    #:encryption-key some-valid-encryption-key
+                    #:signing-key some-valid-signing-key))))
+
+(define (retired-key-rejected?)
+  (let* ((keyring '((("2026a" (encryption-key . "enc-2026a")
+                             (signing-key . "sig-2026a")))))
+         (sealed (encrypt-object #:payload '((v . 1)) #:keyring keyring
+                                 #:key-id "2026a"))
+         (retired '((("2026a" (encryption-key . "enc-2026a")
+                              (signing-key . "sig-2026a")
+                              (not-after . 1000))))))
+    (raises? (lambda ()
+               (unsafe-decrypt-object #:object sealed #:keyring retired)))))
+
+(define (future-key-rejected?)
+  (raises?
+   (lambda ()
+     (unsafe-encrypt-object #:payload '((v . 1)) #:key-id "2026a"
+                            #:keyring '((("2026a"
+                                         (encryption-key . "enc-2026a")
+                                         (signing-key . "sig-2026a")
+                                         (not-before . 9999999999))))))))
+
+(define (bwk1-envelope)
+  (seal-envelope #:plaintext "legacy payload"
+                 #:encryption-key some-valid-encryption-key
+                 #:signing-key some-valid-signing-key
+                 #:version "BWK1" #:key-id "2026a"))
+
+(define envelope-metadata-suite
+  (suite "Envelope metadata (key id, created-at, expiry)"
+         (test "metadata is reported without any key"
+               (assert-true (integer? (metadata-field (sealed-envelope-example)
+                                                      'created-at))
+                            #:name "created-at is a Unix timestamp")
+               (assert-equal #:expect default-key-id
+                             #:got (metadata-field (sealed-envelope-example)
+                                                   'key-id)
+                             #:name "the key id is reported")
+               (assert-false (metadata-field (sealed-envelope-example)
+                                             'expires-at)
+                             #:name "there is no expiry unless one was requested")
+               (assert-false (envelope-metadata #:sealed some-valid-token)
+                             #:name "a legacy token has no envelope metadata"))
+         (test "ttl-seconds records an absolute expiry"
+               (assert-equal #:expect 1000
+                             #:got (metadata-field (sealed-with-metadata)
+                                                   'created-at)
+                             #:name "created-at is the requested timestamp")
+               (assert-equal #:expect 4600
+                             #:got (metadata-field (sealed-with-metadata)
+                                                   'expires-at)
+                             #:name "expires-at is created-at plus the ttl")
+               (assert-false (envelope-expired? #:sealed (sealed-with-metadata)
+                                                #:now 2000)
+                             #:name "the envelope is live before its expiry")
+               (assert-true (envelope-expired? #:sealed (sealed-with-metadata)
+                                               #:now 5000)
+                            #:name "the envelope is expired after its expiry"))
+         (test "expiry is enforced when opening"
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (sealed-with-metadata)
+                                        #:encryption-key some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:now 5000)))
+                            #:name "an expired envelope is refused")
+               (assert-equal #:expect "ttl payload"
+                             #:got (open-envelope
+                                    #:sealed (sealed-with-metadata)
+                                    #:encryption-key some-valid-encryption-key
+                                    #:signing-key some-valid-signing-key
+                                    #:now 5000 #:enforce-expiry? #f)
+                             #:name "enforce-expiry? #f still opens it")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (sealed-with-metadata)
+                                        #:encryption-key some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:now 2000 #:max-age-seconds 100)))
+                            #:name "max-age-seconds enforces a rotation policy"))
+         (test "the metadata is covered by the MAC"
+               (assert-true (tampered-created-at-rejected?)
+                            #:name "editing created-at breaks the integrity check"))
+         (test "expired tokens and objects are refused"
+               (assert-true (expired-token-rejected?)
+                            #:name "a token sealed with a past expiry is refused")
+               (assert-true (expired-object-rejected?)
+                            #:name "an object sealed with a past expiry is refused")
+               (assert-false (envelope-expired? #:sealed "not-an-envelope")
+                             #:name "expiry auditing ignores non-envelopes"))
+         (test "keyring validity windows enforce rotation"
+               (assert-true (retired-key-rejected?)
+                            #:name "a key past not-after cannot open data")
+               (assert-true (future-key-rejected?)
+                            #:name "a key before not-before cannot seal data"))
+         (test "BWK1 envelopes remain readable"
+               (assert-true (and (string-contains (bwk1-envelope) "BWK1.2026a.")
+                                 #t)
+                            #:name "a BWK1 envelope can still be produced")
+               (assert-equal #:expect "BWK1"
+                             #:got (metadata-field (bwk1-envelope) 'version)
+                             #:name "its metadata reports version BWK1")
+               (assert-false (metadata-field (bwk1-envelope) 'created-at)
+                             #:name "BWK1 carries no created-at")
+               (assert-equal #:expect "legacy payload"
+                             #:got (open-envelope
+                                    #:sealed (bwk1-envelope)
+                                    #:encryption-key some-valid-encryption-key
+                                    #:signing-key some-valid-signing-key)
+                             #:name "a BWK1 envelope still opens")
+               (assert-true (sealed-envelope? (bwk1-envelope))
+                            #:name "BWK1 is recognised as an envelope"))
+         (test "invalid sealing options are rejected"
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope
+                                        #:plaintext "x"
+                                        #:encryption-key some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:expires-at 20 #:ttl-seconds 10)))
+                            #:name "expires-at and ttl-seconds are mutually exclusive")
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope
+                                        #:plaintext "x"
+                                        #:encryption-key some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:ttl-seconds "an hour")))
+                            #:name "a non-integer ttl-seconds is rejected")
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope
+                                        #:plaintext "x"
+                                        #:encryption-key some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:version "BWK9")))
+                            #:name "an unsupported version is rejected")
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope
+                                        #:plaintext "x"
+                                        #:encryption-key some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:version "BWK1" #:ttl-seconds 60)))
+                            #:name "BWK1 refuses to silently drop an expiry"))))
+
 (define (spec)
   (veritas-run generate-token-suite decode-token-suite lossless-token-suite
-               garble-ungarble-string-suite has-needed-permissions-suite))
+               garble-ungarble-string-suite has-needed-permissions-suite
+               is-token-expired-suite token-helpers-suite
+               generic-object-suite sealed-envelope-suite
+               envelope-metadata-suite))
 

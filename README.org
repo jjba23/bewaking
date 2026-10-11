@@ -7,9 +7,12 @@ bewaking provides functionalities to (double) encrypt and decrypt data, aided by
 
 It also provides a domain-specific language (DSL) to be used for authorization, authentication and token generation for your Guile Scheme projects, including a simple user permission system.
 
+More recently it also ships a password-strength module, so you can measure and classify password quality, and generate strong passwords, without leaving Guile.
+
 Data is protected through multiple layers of cryptography techniques and obfuscation tricks, producing secure files and tokens one can use.
 
 If you like my work, please support me by [[https://bmc.link/jjbigorra][buying me a cup of coffee ☕]] so I can continue with a lot of motivation.
+
 
 ----------------
 
@@ -22,6 +25,124 @@ We rely on the external tools ~xxd~, ~openssl~ and ~base64~ available on the sys
 You can find the technical Guile Scheme API documentation for Bewaking here:
 
 https://jointhefreeworld.org/api-docs/bewaking/API.html
+
+----------------
+
+* Dependencies
+
+bewaking deliberately keeps its dependency surface small: a recent Guile, one
+small helper library for UUIDs, and three ubiquitous command-line tools. This
+section documents every dependency, what it is used for, and how to obtain it.
+
+** Runtime dependencies
+
+| Dependency     | Minimum | Used for                                                        | Provided by                     |
+|----------------+---------+-----------------------------------------------------------------+---------------------------------|
+| GNU Guile      | 3.0     | The language runtime and standard library                       | =guile= in Guix                 |
+| =guile-uuid=   | 0.9     | Generating the =token-id= (a random UUID v4)                    | =guile-uuid= in Guix            |
+| =guile-gcrypt= | 0.5     | Pulled in transitively by =guile-uuid= for random bytes/hashing | =guile-gcrypt= in Guix          |
+| =openssl=      | any 1.1 | The AES-256 CBC encryption/decryption (with PBKDF2)             | =openssl= (OpenSSL CLI)         |
+| =xxd=          | any     | Base16 (hexadecimal) encoding and decoding                      | =xxd= (part of Vim)             |
+| =base64=       | any     | Base64 encoding and decoding                                    | =base64= (GNU coreutils)        |
+
+The three external tools must be available in =PATH= at run time. bewaking
+shells out to them for the heavy cryptographic work; it does not link against
+OpenSSL directly.
+
+*** Note on OpenSSL: legacy vs. provider
+
+bewaking uses the portable, classic invocations
+~openssl enc -aes256 -pbkdf2 -a -A~ and ~openssl aes-256-cbc -d -pbkdf2 -a -A~.
+On modern OpenSSL 3.x these select the default provider and print a benign
+=bad decrypt= message to stderr when a key is wrong; bewaking treats the empty
+output of a failed decryption as a graceful failure and returns =#f= from the
+safe API.
+
+** Development and testing dependencies
+
+These are only needed to develop bewaking, run its tests, or build its docs.
+
+| Dependency        | Used for                                                     |
+|-------------------+--------------------------------------------------------------|
+| =guile-veritas=   | The test framework and runner                                |
+| =guile-json=      | Transitive dependency of =guile-veritas= (reporting)         |
+| =guile-fibers=    | Transitive dependency of =guile-veritas= (concurrent tests)  |
+| =guile-ares-rs=   | Optional nREPL server for the =repl= task                    |
+| =guile-documenta= | Generating the technical API documentation                   |
+| =texinfo=         | Rendering generated Texinfo docs to HTML                     |
+| =watchexec=       | Hot-reloading during development (=dev= / =hr= tasks)        |
+| =guix= and =maak= | The reproducible task runner and environment manager         |
+
+All of them are declared in [[file:manifest.scm][manifest.scm]], so a single Guix
+shell is enough to get a complete, reproducible environment.
+
+----------------
+
+* Installation
+
+bewaking is developed and consumed with [[https://guix.gnu.org/][GNU Guix]]. The pinned channel
+revision lives in [[file:channels.scm][channels.scm]] and every dependency in
+[[file:manifest.scm][manifest.scm]].
+
+** Enter a complete development environment
+
+Enter a shell with all runtime and development dependencies, at the exact
+channel revision recorded by the project:
+
+#+begin_src shell
+guix time-machine -C channels.scm -- shell -m manifest.scm
+#+end_src
+
+** Minimal runtime environment
+
+If you only want to run released code, you need Guile, =guile-uuid= (and its
+=guile-gcrypt= dependency) plus the external tools:
+
+#+begin_src shell
+guix shell guile guile-uuid openssl xxd coreutils
+#+end_src
+
+** Use it from your own project
+
+Add bewaking's =src= directory to your load path, then import one or both of its
+modules:
+
+#+begin_src scheme
+(use-modules (bewaking bewaking))  ; tokens, sealing, permissions
+(use-modules (bewaking password))  ; password strength and generation
+#+end_src
+
+----------------
+
+* Quick start
+
+#+begin_src scheme
+(use-modules (bewaking bewaking))
+
+(define encryption-key "952e0690-6c3b-4828-b191-961bf98d055c") ; 1st seal
+(define signing-key    "503f5869-0a3c-4460-971f-5a88662de3fc") ; 2nd seal
+
+(define (get-owner-details)
+  '((id . "144959d3-7a8e-455e-b608-31e35145a2fa")
+    (email . "joe@example.com")
+    (name . "Joe")
+    (permissions read-only access-files manage-profile)))
+
+;; 1. Create a token.
+(define token (generate-token #:encryption-key encryption-key
+                              #:signing-key    signing-key
+                              #:get-owner-details get-owner-details))
+
+;; 2. Read it back.
+(define payload (decrypt-token #:token token
+                               #:encryption-key encryption-key
+                               #:signing-key    signing-key))
+
+;; 3. Make authorization decisions.
+(has-needed-permissions? #:present (assoc-ref payload 'owner-permissions)
+                         #:needed  '(access-files))     ; => #t
+(is-token-expired? #:token payload)                     ; => #f
+#+end_src
 
 -----------------
 
@@ -41,7 +162,6 @@ For flexibility and using the power of Lisp, a user's token payload is accepted 
       (permissions read-only
                    access-files
                    manage-profile))))
-
 #+end_src
 
 The data that will actually be encrypted looks like this (and this is also the data you get from decrypting a token):
@@ -106,8 +226,541 @@ The owner:
 Before the payload is encrypted, the code checks if these essential fields are present using the ~token-payload-valid?~ function.
 If any are missing, it throws an error, indicating that a valid token cannot be generated without complete owner details.
 
+----------------
 
-------------------------
+* The token API
+
+All token functions live in ~(bewaking bewaking)~. Functions whose name starts
+with ~unsafe-~ raise errors on failure, while their unprefixed counterparts
+catch errors, print a message, and return =#f=.
+
+| Function                        | Arguments                                                                  | Returns                                     |
+|---------------------------------+----------------------------------------------------------------------------+---------------------------------------------|
+| ~generate-token~                | =#:encryption-key=, =#:signing-key=, =#:get-owner-details=, =#:token-validity-seconds=, =#:key-id=, =#:mac-key=, =#:keyring=, =#:ttl-seconds=, =#:expires-at= | token string, or =#f= on failure            |
+| ~decrypt-token~                 | =#:token=, =#:encryption-key=, =#:signing-key=, =#:mac-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds= | payload alist, or =#f= on failure           |
+| ~unsafe-generate-token~         | same as ~generate-token~                                                    | token string (raises on failure)            |
+| ~unsafe-decrypt-token~          | same as ~decrypt-token~                                                     | payload alist (raises on failure)           |
+| ~token-payload-valid?~          | =payload=                                                                   | =#t= when every required field is present   |
+| ~is-token-expired?~             | =#:token=                                                                   | =#t= when =token-expires-at= is in the past |
+| ~token-remaining-seconds~       | =#:token=                                                                   | seconds left (negative once expired)        |
+| ~token-valid?~                  | =#:token=                                                                   | =#t= when well-formed *and* unexpired       |
+
+*** Checking a token's lifetime
+
+#+begin_src scheme
+(is-token-expired? #:token payload)                 ; #f while still valid
+(token-remaining-seconds #:token payload)           ; e.g. 604800
+(token-valid? #:token payload)                      ; #t
+#+end_src
+
+~is-token-expired?~ and ~token-remaining-seconds~ raise an error when the
+payload has no numeric =token-expires-at= field. Use these helpers *after*
+decrypting a token; passing an arbitrary alist is not meaningful.
+
+These helpers examine the *decrypted payload*, whose expiry comes from
+=#:token-validity-seconds=. The envelope itself can carry an independent expiry
+(see [[#sealed-envelope][Versioned and authenticated seals]]) via =#:ttl-seconds= or =#:expires-at=;
+~decrypt-token~ refuses to open a token whose envelope expiry has passed, so
+the two together let you bound a token both by its payload lifetime and by the
+rotation policy of the key that sealed it.
+
+----------------
+
+* Generic payloads: encrypt-object / decrypt-object
+
+You are not limited to authorization tokens. Any Scheme datum that ~write~ can
+serialize can be sealed with the exact same double-encryption, garbling and
+base16 pipeline, and reopened later:
+
+#+begin_src scheme
+(use-modules (bewaking bewaking))
+
+(define sealed
+  (encrypt-object #:payload '((user . "joe")
+                              (age . 42)
+                              (roles admin editor)
+                              (issued-at . 1672531200))
+                  #:encryption-key encryption-key
+                  #:signing-key    signing-key))
+
+(decrypt-object #:object sealed
+                #:encryption-key encryption-key
+                #:signing-key    signing-key)
+;; => ((user . "joe") (age . 42) (roles admin editor) (issued-at . 1672531200))
+#+end_src
+
+Supported payloads include alists, plain lists, vectors, numbers, strings,
+booleans and any nesting of those. The safe ~encrypt-object~ / ~decrypt-object~
+return =#f= on failure; ~unsafe-encrypt-object~ / ~unsafe-decrypt-object~ raise.
+
+Decrypted content is parsed with Scheme's ~read~, never ~eval~. Untrusted data
+therefore cannot execute code during decryption.
+
+----------------
+
+* Versioned and authenticated seals
+
+Sealed tokens and objects are wrapped in a self-describing, integrity-protected
+envelope whose header also carries *rotation metadata*:
+
+#+begin_src text
+BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
+#+end_src
+
+- =BWK2= — the *format version tag*. It lets the format evolve while older data
+  stays readable.
+- =<key-id>= — a short label identifying which key sealed the data (default
+  =“default”). It enables [[#key-rotation][key rotation]].
+- =<created-at>= — the Unix timestamp (seconds) at which the data was sealed.
+- =<expires-at>= — the Unix timestamp after which the data must not be opened,
+  or =-= when it never expires.
+- =<body>= — the double-encrypted, garbled, Base16 payload produced by the core
+  pipeline described above.
+- =<mac>= — the hexadecimal HMAC-SHA256 of the *whole header and body*, keyed by
+  the *MAC key*.
+
+The MAC is verified *before* any decryption is attempted, so tampering is
+reported explicitly — =integrity check failed= — instead of surfacing as a
+confusing decryption error or as silent corruption. Because the MAC covers the
+metadata, =key-id=, =created-at= and =expires-at= can be trusted once verified
+and *audited without any key* through ~envelope-metadata~. By default the MAC
+key is derived from the signing key with a fixed domain-separation suffix, so no
+extra key is required; pass =#:mac-key= when you want strict key separation.
+
+** Rotation metadata: expiry and audit
+
+Pass =#:ttl-seconds= (a lifetime from now) or =#:expires-at= (an absolute
+timestamp) when sealing to record an expiry. ~open-envelope~ then refuses to
+open data whose expiry has passed, and ~open-envelope~'s =#:max-age-seconds=
+adds a blanket “nothing older than this” policy:
+
+#+begin_src scheme
+(define sealed (seal-envelope #:plaintext "a shared secret"
+                              #:encryption-key k1 #:signing-key k2
+                              #:key-id "2026a"
+                              #:ttl-seconds (* 24 3600)))   ; good for a day
+
+;; Audit the header with no key at all — useful for tooling and log review.
+(envelope-metadata #:sealed sealed)
+;; => ((version . "BWK2") (key-id . "2026a")
+;;     (created-at . 1791709670) (expires-at . 1791796070))
+
+(envelope-expired? #:sealed sealed)                 ; => #f while it is live
+(open-envelope #:sealed sealed                       ; raises once expired
+               #:encryption-key k1 #:signing-key k2)
+(open-envelope #:sealed sealed #:now some-timestamp  ; deterministic checks
+               #:encryption-key k1 #:signing-key k2)
+#+end_src
+
+=#:enforce-expiry?= (default =#t=) and =#:allow-expired= on the command line
+exist for recovery and audit: they open expired data instead of refusing it.
+
+** Sealing API
+
+| Function              | Arguments                                                                                                  | Returns                                        |
+|-----------------------+------------------------------------------------------------------------------------------------------------+------------------------------------------------|
+| ~seal-envelope~       | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:mac-key=, =#:version=, =#:created-at=, =#:expires-at=, =#:ttl-seconds= | envelope string               |
+| ~open-envelope~       | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:mac-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry) |
+| ~sealed-envelope?~    | =sealed=                                                                                                    | =#t= when it is a versioned envelope          |
+| ~envelope-metadata~   | =#:sealed=                                                                                                  | alist of version/key-id/created-at/expires-at |
+| ~envelope-expired?~   | =#:sealed=, =#:now=                                                                                         | =#t= when the recorded expiry has passed      |
+
+#+begin_src scheme
+(define sealed (seal-envelope #:plaintext "a shared secret"
+                              #:encryption-key k1 #:signing-key k2))
+
+(open-envelope #:sealed sealed #:encryption-key k1 #:signing-key k2)
+;; => "a shared secret"
+#+end_src
+
+** Key rotation
+
+Every envelope records the key id that sealed it. Provide a *keyring* — an alist
+mapping key ids to their key entries — and bewaking selects the right keys
+automatically when opening. New data is sealed with a chosen key id.
+
+#+begin_src scheme
+(define keyring
+  '(("2026a" (encryption-key . "e1") (signing-key . "s1"))
+    ("2025b" (encryption-key . "e0") (signing-key . "s0"))))
+
+;; Seal with the current key.
+(define sealed (encrypt-object #:payload '((plan . pro))
+                               #:keyring keyring
+                               #:key-id "2026a"))
+
+;; Open with the keyring; the envelope's own key id selects the keys.
+(decrypt-object #:object sealed #:keyring keyring)
+;; => ((plan . pro))
+#+end_src
+
+To rotate keys: add the new key under a fresh key id, start sealing new data
+with it, and keep the old keyring entry until the last token sealed with it has
+expired. A keyring takes precedence over explicit keys; the same path works for
+~generate-token~, ~encrypt-object~, ~decrypt-token~ and ~decrypt-object~.
+
+*** Enforcing a rotation schedule
+
+A keyring entry may carry a validity window, so a rotation policy is enforced at
+run time instead of relying on discipline:
+
+#+begin_src scheme
+(define keyring
+  '(("2026a" (encryption-key . "e1") (signing-key . "s1")
+             (not-before . 1780000000))
+    ("2025b" (encryption-key . "e0") (signing-key . "s0")
+             (not-after . 1790000000))))
+
+;; Raises while the window is open, e.g. "the key '2025b' has been retired."
+(decrypt-object #:object sealed #:keyring keyring)
+#+end_src
+
+=not-before= refuses to use a key before it is activated; =not-after= refuses
+once it is retired. Combine the two with the per-envelope =expires-at= to bound
+data to the lifetime of the key that protects it. The command line reports the
+precise reason for a refusal, so a failed open tells you whether the data
+expired or the key was retired.
+
+*** Legacy envelopes
+
+Version 1 envelopes (=BWK1.<key-id>.<body>.<mac>=) carried no metadata and are
+still opened and produced — pass =#:version "BWK1"= to seal one for readers
+that predate metadata. Their metadata reports =#f= for =created-at= and
+=expires-at=. Data sealed before any versioning (a bare Base16 string with no
+dots) is accepted too by ~decrypt-token~, ~decrypt-object~ and ~open-envelope~,
+and is decrypted with the explicit keys.
+
+----------------
+
+* Command-line interface
+
+The repository ships a small CLI, [[file:bin/bewaking][bin/bewaking]], so tokens, sealed
+objects and passwords can be produced and opened straight from the shell. It is
+a thin wrapper around the same modules, so anything the library can do is
+available here too.
+
+The CLI must run with the project's dependencies on the load path — either from
+inside a Guix development shell (see [[#installation][Installation]]) or with =src= on
+~GUILE_LOAD_PATH=:
+
+#+begin_src shell
+./bin/bewaking help
+#+end_src
+
+** Tokens
+
+#+begin_src shell
+export K1="952e0690-6c3b-4828-b191-961bf98d055c"   # encryption key
+export K2="503f5869-0a3c-4460-971f-5a88662de3fc"   # signing key
+
+# Create a token.
+TOKEN=$(./bin/bewaking token generate \
+  --owner-id owner-1 --owner-name Joe --owner-email joe@example.com \
+  --permissions read,write --validity-seconds 3600 \
+  --encryption-key "$K1" --signing-key "$K2")
+
+# Read it back.
+./bin/bewaking token decrypt --token "$TOKEN" \
+  --encryption-key "$K1" --signing-key "$K2"
+#+end_src
+
+So that keys never appear in the process list, pass them from files, or export
+the environment variables the CLI falls back to. Precedence is: explicit
+option, then file, then environment variable. A =--keyring FILE= takes
+precedence over both when given.
+
+#+begin_src shell
+export BEWAKING_ENCRYPTION_KEY="$K1"
+export BEWAKING_SIGNING_KEY="$K2"
+
+# The next commands pick the keys up automatically.
+./bin/bewaking token decrypt --token "$TOKEN"
+./bin/bewaking token decrypt --token "$TOKEN" \
+  --encryption-key-file ./k1.txt --signing-key-file ./k2.txt
+#+end_src
+
+Sealing commands accept =--key-id LABEL= to tag the envelope for
+[[#key-rotation][key rotation]], and =--keyring FILE= to select keys from an
+alist of key id to key entry. Entries may carry =not-before= / =not-after=
+validity windows so a rotation schedule is enforced:
+
+#+begin_src shell
+# ./keyring.scm
+# (("2026a" (encryption-key . "e1") (signing-key . "s1"))
+#  ("2025b" (encryption-key . "e0") (signing-key . "s0")
+#           (not-after . 1790000000)))
+
+TOKEN=$(./bin/bewaking token generate --owner-id o1 --keyring ./keyring.scm \
+  --key-id 2026a)
+./bin/bewaking token decrypt --token "$TOKEN" --keyring ./keyring.scm
+#+end_src
+
+** Rotation metadata and audit
+
+Sealing commands can record an expiry, and every envelope's header can be read
+back without any key:
+
+#+begin_src shell
+# Seal data that is only valid for an hour.
+TOKEN=$(./bin/bewaking token generate --owner-id o1 \
+  --encryption-key "$K1" --signing-key "$K2" --ttl-seconds 3600)
+
+# Audit the header with no keys at all.
+./bin/bewaking token inspect --token "$TOKEN"
+# version:    BWK2
+# key-id:     default
+# created-at: 1791709670
+# expires-at: 1791713270
+# expired:    no
+
+# Expired data is refused, and the reason is stated precisely ...
+./bin/bewaking token decrypt --token "$TOKEN" --encryption-key "$K1" \
+  --signing-key "$K2"
+# bewaking: failed to decrypt token
+#   (open-envelope: the sealed data expired at 1000 (key 'default').)
+
+# ... unless you explicitly ask for it (recovery and audit only).
+./bin/bewaking token decrypt --token "$TOKEN" --allow-expired \
+  --encryption-key "$K1" --signing-key "$K2"
+
+# Or refuse anything sealed longer ago than a day.
+./bin/bewaking object decrypt --input ./sealed.scm --max-age-seconds 86400 \
+  --encryption-key "$K1" --signing-key "$K2"
+#+end_src
+
+The same =--ttl-seconds=, =--expires-at=, =--max-age-seconds= and
+=--allow-expired= options work for =token generate=, =token decrypt=,
+=object encrypt= and =object decrypt=. Failures state the specific reason — an
+expired envelope or a retired key — rather than a generic error.
+
+** Sealed objects
+
+Object commands read a Scheme datum with ~read~ from =--input FILE= or from
+standard input, and print the result on standard output:
+
+#+begin_src shell
+SEALED=$(echo '((name . Joe) (score . 7))' \
+  | ./bin/bewaking object encrypt \
+      --encryption-key "$K1" --signing-key "$K2")
+
+printf '%s' "$SEALED" \
+  | ./bin/bewaking object decrypt \
+      --encryption-key "$K1" --signing-key "$K2"
+;; => ((name . Joe) (score . 7))
+#+end_src
+
+** Passwords
+
+#+begin_src shell
+./bin/bewaking password strength 'correct horse battery staple'
+./bin/bewaking password generate --length 32
+./bin/bewaking password generate --length 16 --no-symbols
+#+end_src
+
+** Exit codes
+
+The CLI exits with =0= on success and =1= on any error (missing keys, wrong
+key, unreadable input, unknown command). Diagnostics are written to standard
+error, so standard output stays clean for piping.
+
+----------------
+
+* Low-level primitives
+
+These building blocks are exported for advanced use and are exactly the
+operations the higher-level API is composed from.
+
+| Function                               | Purpose                                                    |
+|----------------------------------------+------------------------------------------------------------|
+| ~encrypt-payload= str key~             | One AES-256 (PBKDF2) encryption pass, base64-encoded       |
+| ~decrypt-payload= str key~             | Reverse of ~encrypt-payload~                               |
+| ~string-garble= s~                     | Reversible obfuscation (split, reverse halves, swap)       |
+| ~string-ungarble= s~                   | Reverse of ~string-garble~                                 |
+| ~base16-encode= s~                     | Hexadecimal encode (via ~xxd~)                             |
+| ~base16-decode= s~                     | Hexadecimal decode (via ~xxd~)                             |
+| ~has-needed-permissions?~              | Set-subset check for permission symbols                    |
+
+#+begin_src scheme
+(encrypt-payload "mysecretdata" "mysecretkey")
+;; => a base64 string starting with "U2FsdGVkX1+..."
+
+(string-ungarble (string-garble "hello world")) ; => "hello world"
+#+end_src
+
+----------------
+
+* Permissions
+
+~has-needed-permissions?~ checks that every needed permission is present. The
+comparison is a set-subset test, so order does not matter:
+
+#+begin_src scheme
+(has-needed-permissions? #:present '(reader admin) #:needed '(admin))        ; #t
+(has-needed-permissions? #:present '(reader)       #:needed '(admin))        ; #f
+(has-needed-permissions? #:present '(reader admin) #:needed '(admin reader)); #t
+#+end_src
+
+----------------
+
+* Password strength
+
+A dedicated module, ~(bewaking password)~, measures and generates passwords.
+It has no runtime dependency beyond Guile itself.
+
+#+begin_src scheme
+(use-modules (bewaking password))
+
+;; Inspect the character classes present in a password.
+(password-character-classes "Abc123!") ; => (lowercase uppercase digit symbol)
+
+;; Raw entropy estimate in bits: length * log2(pool size).
+(password-entropy #:password "correct horse battery staple") ; => ~131.6
+
+;; A full report: score 0-4, label, entropy, length, classes and feedback.
+(password-strength #:password "Tr0ub4dor&3")
+;; => ((score . 3)
+;;     (label . "strong")
+;;     (entropy . 72.27)
+;;     (raw-entropy . 72.27)
+;;     (length . 11)
+;;     (classes lowercase uppercase digit symbol)
+;;     (feedback "Longer passphrases are significantly harder to crack."))
+
+;; Convenience predicate; score 3 ("strong") or better passes by default.
+(strong-password? #:password "123456")                    ; => #f
+(strong-password? #:password "correct horse battery staple") ; => #t
+#+end_src
+
+*** Scoring model
+
+The estimator starts from ~password-entropy~ (length times the base-2 logarithm
+of the guessing pool), then applies penalties for:
+
+- membership in a built-in list of common passwords (this forces a score of 0),
+- passwords shorter than 8 characters,
+- runs of the same character (e.g. =aaaa=),
+- ascending or descending sequences (e.g. =abcd= or =4321=).
+
+The penalty-adjusted entropy maps to a score:
+
+| Entropy (bits) | Score | Label       |
+|----------------+-------+-------------|
+| < 28           | 0     | very weak   |
+| 28 - 39        | 1     | weak        |
+| 40 - 59        | 2     | fair        |
+| 60 - 79        | 3     | strong      |
+| >= 80          | 4     | very strong |
+
+This is a practical heuristic, not a formal guarantee of security. A long
+passphrase of common words scores highly because it has a large search space,
+even though it uses a single character class.
+
+*** Generating strong passwords
+
+#+begin_src scheme
+(generate-strong-password)                              ; 24 chars, all classes
+(generate-strong-password #:length 32)                  ; custom length
+(generate-strong-password #:length 16 #:include-symbols #f) ; no symbols
+#+end_src
+
+Generation guarantees at least one character from every included class, fills
+the rest uniformly, then shuffles the result so there is no positional bias.
+The random state is seeded from the platform at module load, giving
+unpredictable output across runs.
+
+----------------
+
+* Security notes
+
+- *No shell injection.* Every value that is interpolated into an external
+  command (~openssl~, ~xxd~, ~base64~) is passed through ~shell-quote~, which
+  wraps it in single quotes and escapes embedded quotes. Arbitrary payloads and
+  keys are therefore treated as data, not as shell syntax.
+- *No evaluation of decrypted content.* Decrypted payloads are parsed with
+  ~read~, which cannot execute code. (Guile also disables the ~#.~ read-eval
+  syntax by default.) Older tokens that serialized their payload as a
+  top-level ~(quasiquote ...)~ form are still supported: the wrapper is unwrapped
+  structurally, without evaluation.
+- *Binary data is rejected early.* Argument vectors cannot carry NUL bytes, so
+  ~shell-value~ refuses to pass content containing a NUL to the shell. Since
+  valid bewaking data is always text, a NUL reliably signals a decryption
+  failure and is surfaced as a normal error instead of a malformed command.
+- *Integrity is checked explicitly.* Sealed data carries a version tag and an
+  HMAC-SHA256 that is verified before decryption, so tampering with a token or
+  object is detected and reported rather than silently ignored. The MAC covers
+  the rotation metadata (=key-id=, =created-at=, =expires-at=), so those fields
+  cannot be rewritten without invalidating the seal.
+- *Rotation policies are enforced, not advisory.* An envelope's =expires-at= is
+  checked before decryption (unless =#:enforce-expiry? #f= / =--allow-expired=
+  explicitly asks otherwise), =#:max-age-seconds= bounds how old data may be, and
+  a keyring entry's =not-before= / =not-after= window restricts when a key may be
+  used. Expired data is refused rather than quietly decrypted.
+- *Obfuscation is not security.* ~string-garble~ / ~string-ungarble~ are
+  reversible by design; the real protection comes from the two independent
+  AES-256 keys.
+- *Key handling is the caller's responsibility.* Keep the ~encryption-key~ and
+  ~signing-key~ secret and distinct. Because keys are passed to ~openssl -k~
+  they may be visible to other processes on the same host; for high-assurance
+  use, supply keys through a secure channel or wrap the calls yourself.
+
+----------------
+
+* Testing
+
+Tests live under [[file:test/veritas/unit/][test/veritas/unit]] and use
+[[https://codeberg.org/jjba23/guile-veritas][guile-veritas]].
+
+Run the whole suite through the project task runner:
+
+#+begin_src shell
+maak test
+#+end_src
+
+Or directly, if you are already inside a shell with the dependencies on the
+load path:
+
+#+begin_src shell
+guile -L ./src -L ./test -c '((@ (veritas runner) run-tests))'
+#+end_src
+
+Current coverage includes:
+
+- token generation and lossless encode/decode round-trips,
+- graceful failure with wrong keys and malformed tokens,
+- ~is-token-expired?~ across past, future and malformed expiry values,
+- ~token-remaining-seconds~ and ~token-valid?~,
+- garbling/ungarbling reversibility, including random strings,
+- permission subset checks,
+- generic ~encrypt-object~ / ~decrypt-object~ round-trips for alists, strings,
+  numbers and lists,
+- password character-class detection, entropy, scoring, feedback, the
+  ~strong-password?~ predicate and the password generator,
+- the CLI: dispatch and exit codes, token and object round-trips through the
+  command line, key-id/keyring rotation, rotation-metadata enforcement and
+  =token inspect= audit output, and password commands,
+- the versioned envelope: version tagging, MAC integrity checks, tamper and
+  wrong-MAC-key rejection, key rotation by key id, and legacy-token readability,
+- rotation metadata: =created-at= recording, =ttl-seconds= / =expires-at=,
+  keyless =envelope-metadata= auditing, expiry enforcement on open,
+  =max-age-seconds=, authenticated metadata (rewriting the header breaks the
+  MAC), keyring =not-before= / =not-after= windows, and =BWK1= / legacy
+  readability.
+
+----------------
+
+* Documentation
+
+Generate the technical API documentation (requires ~guile-documenta~ and
+~texinfo~):
+
+#+begin_src shell
+maak docs
+#+end_src
+
+The generated HTML is written to =doc/api-dist= and includes every exported
+binding from both ~(bewaking bewaking)~ and ~(bewaking password)~.
+
+----------------
 
 * Projects that use Bewaking
 
@@ -132,7 +785,9 @@ D --> E[Garble String]
 E --> F[Encrypt with signing-key]
 F --> G[Garble String]
 G --> H[Base16 Encode]
-H --> J(Generated Token)
+H --> X[Add key id + created-at + expires-at]
+X --> K[Signed header + HMAC-SHA256]
+K --> J[Generated Token: BWK2.kid.created.expires.body.mac]
 C -- No --> I(Error)
 D -- Error --> I
 F -- Error --> I
@@ -145,7 +800,13 @@ class I error;
 #+begin_src mermaid
 graph LR
 
-H[Token] --> J[Base16 Decode]
+H[Token] --> W[Read header: key id, created-at, expires-at]
+W --> V{Version tag + HMAC valid?}
+V -- No --> R(Error)
+V -- Yes --> Y{Envelope expired?
+policy allows it?}
+Y -- No --> R(Error)
+Y -- Yes --> J[Base16 Decode]
 J --> K[Ungarble String]
 K --> L[Decrypt with signing-key]
 L --> M[Ungarble String]
