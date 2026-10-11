@@ -248,13 +248,6 @@ on every field, and returning either #t or #f representing validity status."
        (not (string-contains key-id "."))
        (not (string-any char-set:whitespace key-id))))
 
-(define (index-of-char str ch)
-  "Return the index of the first occurrence of @var{ch} in @var{str}, or #f."
-  (let loop ((i 0))
-    (cond ((= i (string-length str)) #f)
-          ((char=? (string-ref str i) ch) i)
-          (else (loop (+ i 1))))))
-
 (define (compute-mac message mac-key)
   "Compute HMAC-SHA256 of @var{message}, keyed by @var{mac-key}, and return it as
    a lowercase hexadecimal string. The MAC is computed in this process with
@@ -279,9 +272,7 @@ on every field, and returning either #t or #f representing validity status."
   "Return #t when @var{sealed} is a versioned, authenticated bewaking envelope
    of the current format version."
   (and (string? sealed)
-       (let ((dot (index-of-char sealed #\.)))
-         (and dot
-              (string=? (substring sealed 0 dot) seal-format-version)))))
+       (string-prefix? (string-append seal-format-version ".") sealed)))
 
 (define (parse-envelope sealed)
   "Parse an envelope into an alist with @code{version}, @code{key-id},

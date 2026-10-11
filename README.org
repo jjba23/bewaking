@@ -316,8 +316,9 @@ envelope whose header also carries *rotation metadata*:
 BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
 #+end_src
 
-- =BWK2= — the *format version tag*. It lets the format evolve while older data
-  stays readable.
+- =BWK2= — the *format version tag*. It leaves room for the format to evolve:
+  only the current version is accepted, and anything else is refused rather than
+  guessed at.
 - =<key-id>= — a short label identifying which key sealed the data (default
   =“default”). It enables [[#key-rotation][key rotation]].
 - =<created-at>= — the Unix timestamp (seconds) at which the data was sealed.
@@ -330,7 +331,10 @@ BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
 
 The MAC is verified *before* any decryption is attempted, so tampering is
 reported explicitly — =integrity check failed= — instead of surfacing as a
-confusing decryption error or as silent corruption. Because the MAC covers the
+confusing decryption error or as silent corruption. A payload that is not a
+current-version envelope, such as an older =BWK1= envelope or a pre-versioning
+bare Base16 token, is refused with =not a BWK2 envelope= instead of being
+decrypted on a guess. Because the MAC covers the
 metadata, =key-id=, =created-at= and =expires-at= can be trusted once verified
 and *audited without any key* through ~envelope-metadata~. By default the MAC
 key is derived from the signing key with a fixed domain-separation suffix, so no
@@ -368,7 +372,7 @@ exist for recovery and audit: they open expired data instead of refusing it.
 
 | Function              | Arguments                                                                                                  | Returns                                        |
 |-----------------------+------------------------------------------------------------------------------------------------------------+------------------------------------------------|
-| ~seal-envelope~       | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:mac-key=, =#:version=, =#:created-at=, =#:expires-at=, =#:ttl-seconds= | envelope string               |
+| ~seal-envelope~       | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:mac-key=, =#:created-at=, =#:expires-at=, =#:ttl-seconds= | envelope string               |
 | ~open-envelope~       | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:mac-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry) |
 | ~sealed-envelope?~    | =sealed=                                                                                                    | =#t= when it is a versioned envelope          |
 | ~envelope-metadata~   | =#:sealed=                                                                                                  | alist of version/key-id/created-at/expires-at |
@@ -430,14 +434,15 @@ data to the lifetime of the key that protects it. The command line reports the
 precise reason for a refusal, so a failed open tells you whether the data
 expired or the key was retired.
 
-*** Legacy envelopes
+*** Producing and reading a single version
 
-Version 1 envelopes (=BWK1.<key-id>.<body>.<mac>=) carried no metadata and are
-still opened and produced — pass =#:version "BWK1"= to seal one for readers
-that predate metadata. Their metadata reports =#f= for =created-at= and
-=expires-at=. Data sealed before any versioning (a bare Base16 string with no
-dots) is accepted too by ~decrypt-token~, ~decrypt-object~ and ~open-envelope~,
-and is decrypted with the explicit keys.
+Only the current format version is produced, and only the current format version
+is read. An older envelope receives the same treatment as arbitrary text: it is
+refused, with a message saying so, rather than being decrypted on a guess. Data
+sealed before the envelope existed (a bare Base16 string with no dots) is
+refused for the same reason. If you are upgrading an installation that holds
+tokens in an older format, re-issue them: the payload is only ever as durable as
+the key material, and a fresh token is one ~generate-token~ call away.
 
 ----------------
 
@@ -1031,9 +1036,8 @@ unpredictable output across runs.
   can confuse.
 - *No evaluation of decrypted content.* Decrypted payloads are parsed with
   ~read~, which cannot execute code. (Guile also disables the ~#.~ read-eval
-  syntax by default.) Older tokens that serialized their payload as a
-  top-level ~(quasiquote ...)~ form are still supported: the wrapper is unwrapped
-  structurally, without evaluation.
+  syntax by default.) Whatever was sealed is what comes back — there is no
+  wrapper to interpret and no older encoding to guess at.
 - *Malformed input is refused early.* A wrong key surfaces as a padding or
   format error before any payload is parsed, instead of being mistaken for
   valid data. Base64 and Base16 input is validated character by character.
@@ -1094,13 +1098,13 @@ Current coverage includes:
 - the CLI: dispatch and exit codes, token and object round-trips through the
   command line, key-id/keyring rotation, rotation-metadata enforcement and
   =token inspect= audit output, and password commands,
-- the versioned envelope: version tagging, MAC integrity checks, tamper and
-  wrong-MAC-key rejection, key rotation by key id, and legacy-token readability,
+- the versioned envelope: version tagging, malformed-envelope rejection, MAC
+  integrity checks, tamper and wrong-MAC-key rejection, key rotation by key id,
+  and refusal of older versions and of pre-versioning bare Base16 data,
 - rotation metadata: =created-at= recording, =ttl-seconds= / =expires-at=,
   keyless =envelope-metadata= auditing, expiry enforcement on open,
   =max-age-seconds=, authenticated metadata (rewriting the header breaks the
-  MAC), keyring =not-before= / =not-after= windows, and =BWK1= / legacy
-  readability.
+  MAC), and keyring =not-before= / =not-after= windows.
 
 ----------------
 
