@@ -420,9 +420,13 @@ cipher:
   plaintext exists only once authenticity is established; altering =key-id=,
   =created-at= or =expires-at= — including extending an expiry — makes the tag
   fail rather than changing what the envelope means.
-- Tampering is reported as =GCM authentication failed=, not as a confusing
-  decryption error or silent corruption. A wrong key looks the same, which is
-  exactly what a tag is for.
+- Tampering is *refused*, not reported in detail. The underlying cipher says
+  =GCM authentication failed=, and that message is exactly what a direct user of
+  the ~(bewaking crypto)~ primitive sees, because a tag is what tells a wrong key
+  from edited data. At the envelope layer, though, ~open-envelope~ deliberately
+  answers with one refusal for every "could not open this" cause — see
+  [[#a-refusal-does-not-enumerate-the-keyring][A refusal does not enumerate
+  the keyring]].
 
 Because the metadata is authenticated, =key-id=, =created-at= and =expires-at=
 can still be *audited without any key* through ~envelope-metadata~, which is what
@@ -453,6 +457,34 @@ now serve as *rejection* fixtures, so a reintroduced reader for an old format
 would fail the suite instead of slipping back in. The only format versions
 bewaking knows are exposed as ~readable-seal-format-versions~, and today that
 list contains just the one entry.
+
+** A refusal does not enumerate the keyring
+
+Every "we could not open this" answer is the same message, on every surface —
+the library's error, what ~decrypt-token~ prints, the CLI's message and its exit
+code:
+
+#+begin_src text
+bewaking: the sealed data could not be opened: unknown, retired or wrong key, or the data was altered.
+#+end_src
+
+The key id travels in the clear, so anybody can put any label in a token and
+watch how the attempt is refused. If an unknown label failed differently from a
+bad tag — or if the message merely named the label — the refusal itself would
+list which key ids a deployment configures, which is exactly the reconnaissance
+key rotation is supposed to be invisible to.
+
+So an unknown key id, a missing keyring entry, a retired key, a key that is not
+active yet, a wrong key and an altered body are one answer. An unresolvable key
+id does not even stop the attempt early: the envelope is opened with a freshly
+drawn placeholder key that cannot be right, so the work done — and therefore how
+long the refusal takes — is comparable to the wrong-key case as well. A retired
+key still opens nothing, because the placeholder is not the retired key.
+
+Expiry is the one deliberate exception. It is only reached *after* the tag has
+proved the envelope genuine, so telling an operator "this expired" reveals
+nothing an attacker could not already read from the envelope's own header with
+~envelope-metadata~. Everything else stays deliberately unspecific.
 
 ** Rotation metadata: expiry and audit
 
@@ -538,15 +570,14 @@ run time instead of relying on discipline:
     ("2025b" (encryption-key . "e0") (signing-key . "s0")
              (not-after . 1790000000))))
 
-;; Raises while the window is open, e.g. "the key '2025b' has been retired."
+;; Raises while the window rejects the key: the data is sealed with a key that
+;; is not active yet, or has been retired, and cannot be opened at all.
 (decrypt-object #:object sealed #:keyring keyring)
 #+end_src
 
 =not-before= refuses to use a key before it is activated; =not-after= refuses
 once it is retired. Combine the two with the per-envelope =expires-at= to bound
-data to the lifetime of the key that protects it. The command line reports the
-precise reason for a refusal, so a failed open tells you whether the data
-expired or the key was retired.
+data to the lifetime of the key that protects it.
 
 *** One format, one integrity check
 
@@ -648,15 +679,24 @@ TOKEN=$(./bin/bewaking token generate --owner-id o1 \
 # expires-at: 1791713270
 # expired:    no
 
-# Expired data is refused, and the reason is stated precisely ...
+# Expired data is refused. Expiry is the one refusal that is stated in full,
+# because it can only be reached once the envelope has proved genuine ...
 ./bin/bewaking token decrypt --token "$TOKEN" --encryption-key "$K1" \
   --signing-key "$K2"
-# bewaking: failed to decrypt token
-#   (open-envelope: the sealed data expired at 1000 (key 'default').)
+# bewaking: failed to decrypt token (open-envelope: the sealed data expired at
+#   1791713270 (key 'default').)
 
 # ... unless you explicitly ask for it (recovery and audit only).
 ./bin/bewaking token decrypt --token "$TOKEN" --allow-expired \
   --encryption-key "$K1" --signing-key "$K2"
+
+# A token whose key id you do not hold, or whose body was altered, is refused
+# without saying which: one message covers every "could not open this" cause, so
+# a refusal cannot be used to list the key ids a deployment configures.
+./bin/bewaking token decrypt --token "$SOMEONE_ELSES_TOKEN" \
+  --keyring ./keyring.scm
+# bewaking: failed to decrypt token (bewaking: the sealed data could not be
+#   opened: unknown, retired or wrong key, or the data was altered.)
 
 # Or refuse anything sealed longer ago than a day.
 ./bin/bewaking object decrypt --input ./sealed.scm --max-age-seconds 86400 \
@@ -665,8 +705,12 @@ TOKEN=$(./bin/bewaking token generate --owner-id o1 \
 
 The same =--ttl-seconds=, =--expires-at=, =--max-age-seconds= and
 =--allow-expired= options work for =token generate=, =token decrypt=,
-=object encrypt= and =object decrypt=. Failures state the specific reason — an
-expired envelope or a retired key — rather than a generic error.
+=object encrypt= and =object decrypt=. A failure exits with status 1. Expired
+data is told apart and explained; every other refusal — an unknown key id, a
+retired key, a wrong key, an altered body — is one message that names no key id
+and no key material, so the CLI cannot be used to enumerate a keyring. See
+[[#a-refusal-does-not-enumerate-the-keyring][A refusal does not enumerate
+ the keyring]].
 
 ** Sealed objects
 
@@ -1182,10 +1226,19 @@ unpredictable output across runs.
   invalidating the seal. The format is version-tagged so it can evolve, but only
   one version exists today, and any other version tag is refused outright.
 - *Rotation policies are enforced, not advisory.* An envelope's =expires-at= is
-  checked before decryption (unless =#:enforce-expiry? #f= / =--allow-expired=
-  explicitly asks otherwise), =#:max-age-seconds= bounds how old data may be, and
-  a keyring entry's =not-before= / =not-after= window restricts when a key may be
-  used. Expired data is refused rather than quietly decrypted.
+  checked before its plaintext is returned (unless =#:enforce-expiry? #f= /
+  =--allow-expired= explicitly asks otherwise), =#:max-age-seconds= bounds how
+  old data may be, and a keyring entry's =not-before= / =not-after= window
+  restricts when a key may be used. Expired data is refused rather than quietly
+  decrypted, and a retired key stops opening its data at once.
+- *A refusal is not an oracle.* An unknown key id, a missing keyring entry, a
+  retired or not-yet-active key, a wrong key and an altered body all raise the
+  same error, and the attempt is made with a placeholder key rather than
+  abandoned early. Nothing about a refusal — least of all its message — names a
+  key id or enumerates the keyring. Expiry is the one exception, and it is only
+  reachable once the tag has shown the envelope to be genuine. See
+  [[#a-refusal-does-not-enumerate-the-keyring][A refusal does not enumerate
+  the keyring]].
 - *Obfuscation is not security.* ~string-garble~ / ~string-ungarble~ are
   reversible by design; the real protection comes from the two independent
   AES-256 keys.
@@ -1297,14 +1350,18 @@ what that buys them — and what it does not.
 - *No swapping a body between headers.* The header is the cipher's associated
   data, so a valid body moved under a different key id, version or expiry does
   not open: the pair (header, body) is the unit that is authenticated.
-- *No oracle to lean on.* A wrong key, an edited ciphertext and edited associated
-  data are indistinguishable: all three surface as the same =GCM authentication
-  failed= message, and they raise rather than return anything. The tag is checked
-  by libgcrypt's ~gcry_cipher_checktag~ before a byte of plaintext is returned,
-  and the inner CBC layer's padding error is only reached once that tag has been
-  accepted — so the padding error is never a signal an attacker can probe, which
-  is what makes a padding-oracle attack unavailable here rather than merely
-  awkward.
+- *No oracle to lean on.* A wrong key, an edited ciphertext, edited associated
+  data and an unresolvable key id are indistinguishable: the envelope layer
+  raises one refusal for all of them, and it raises rather than returning
+  anything. The tag is checked by libgcrypt's ~gcry_cipher_checktag~ before a
+  byte of plaintext is returned, the inner CBC layer's padding error is only
+  reached once that tag has been accepted, and an unresolvable key id is tried
+  against a placeholder instead of being answered early — so neither the padding
+  error nor the keyring is a signal an attacker can probe. That is what makes a
+  padding-oracle attack and keyring enumeration unavailable here rather than
+  merely awkward. The raw =GCM authentication failed= text still exists for
+  direct users of the ~(bewaking crypto)~ primitive, where it is the honest
+  answer and no key id is involved; the envelope layer does not pass it on.
 - *No code execution from decrypted data.* Payloads are parsed with ~read~, not
   ~eval~, and Guile's ~#.~ read-eval syntax is off by default (verified in the
   suite), so a sealed value cannot smuggle code into the process that opens it.
@@ -1340,10 +1397,15 @@ what that buys them — and what it does not.
   authenticated step. The suite pins this: a payload whose recorded cost is
   above the bound is refused with a parameter error (not by running the
   derivation), while a cost inside the bound is derived and then fails the tag.
-- *Which key ids exist.* A refusal reports the key id it could not resolve,
-  which tells an attacker which labels a deployment configures. That is
-  information about the *schedule*, not the keys; return a uniform error to the
-  client if it matters to you.
+- *Which key ids exist — closed.* An earlier version of this list recorded that
+  a refusal named the key id it could not resolve, which let a caller enumerate
+  a deployment's key ids by probing with labels and watching the message. It no
+  longer does: every "we could not open this" cause returns the same error, and
+  an unresolvable key id is opened against a placeholder key instead of being
+  abandoned early, so the refusal does not differ in message or in work. The
+  key id still appears in the *header*, where ~envelope-metadata~ reads it
+  without any key — but that is a claim to log, not a decision, and it is not a
+  statement about what the deployment's keyring contains.
 - *Replay.* A captured, still-valid token is a bearer credential: the source
   cannot change that, because stateless sessions have no server-side list to
   revoke from. Short lifetimes, key retirement and an optional denylist are the
@@ -1421,12 +1483,16 @@ Current coverage includes:
   is reproduced byte for byte against an independent implementation under both
   PBKDF2 and Argon2id, and a flipped ciphertext byte, a wrong key, altered
   associated data or an unknown key-derivation id are all refused,
-- the two properties that make the source safe to publish: decrypted data is
-  parsed with ~read~ and never evaluated (a sealed value that looks like a
-  program comes back as a string, and Guile's ~#.~ is off), and the
-  attacker-chosen Argon2id cost recorded in a payload is validated against its
-  bounds before any memory is allocated or any pass is run, so a crafted body is
-  refused rather than obeyed.
+- the properties that make the source safe to publish: decrypted data is parsed
+  with ~read~ and never evaluated (a sealed value that looks like a program
+  comes back as a string, and Guile's ~#.~ is off), the attacker-chosen Argon2id
+  cost recorded in a payload is validated against its bounds before any memory
+  is allocated or any pass is run, so a crafted body is refused rather than
+  obeyed, and a refusal never enumerates the keyring — an unknown key id, a
+  missing entry, a retired key, a key that is not active yet, a wrong key and an
+  altered body all produce the identical message at the library and at the
+  command line, with the identical exit code, and the message names neither the
+  key id nor any key material.
 
 ----------------
 

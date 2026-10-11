@@ -481,6 +481,61 @@ on every field, and returning either #t or #f representing validity status."
                                         (string->utf8 header))))
     (format #f "~a.~a" header body)))
 
+;; ====== The one refusal an unopenable envelope gets ======
+;;
+;; Every "we could not open this" answer is the same message. The key id
+;; travels in the clear, so anybody can put any label in a token and watch how
+;; the attempt is refused; if an unknown label failed differently from a bad
+;; tag, the refusal itself would enumerate which key ids a deployment
+;; configures — the reconnaissance that key rotation is meant to be invisible
+;; to. So an unknown key id, a retired one, one that is not active yet, a wrong
+;; key and altered data are one answer, on every surface: the library's error,
+;; what `decrypt-token' prints, the CLI's message and its exit code.
+(define envelope-refusal-message
+  "bewaking: the sealed data could not be opened: unknown, retired or wrong key, or the data was altered.")
+
+(define (refuse-unreadable-envelope)
+  "Raise the one refusal shared by every failure to open an envelope."
+  (error envelope-refusal-message))
+
+(define (unresolved-key-placeholder)
+  "Return a key that is guaranteed not to be a usable one.
+
+   When an envelope names a key id the keyring cannot resolve, opening does not
+   stop early: it continues with this key and fails at the cipher tag, exactly
+   as a wrong key does. That keeps two things true at once. A retired key still
+   opens nothing. And an attacker probing with key ids cannot use *how much work*
+   the attempt cost, or which error came back, to learn which ids exist. The
+   value is drawn fresh each time, so it can never coincide with a real key."
+  (base16-encode (random-bytes 32)))
+
+(define* (usable-key-material #:key keyring key-id encryption-key signing-key
+                              now)
+  "Return the encryption and signing keys to attempt an envelope with: the
+   keyring's pair when @var{key-id} resolves to an entry usable at @var{now},
+   and a freshly drawn placeholder otherwise.
+
+   Failing to resolve is not an error here, deliberately. Opening with a key
+   that cannot be right fails at the cipher tag, which is what a wrong key does,
+   so an unknown, retired or not-yet-active key id is indistinguishable from a
+   bad key — in the message returned and in the work spent producing it."
+  (let ((resolved
+         (catch #t
+           (lambda ()
+             (call-with-values
+                 (lambda ()
+                   (key-material #:keyring keyring #:key-id key-id
+                                 #:encryption-key encryption-key
+                                 #:signing-key signing-key #:now now))
+               (lambda (encryption signing)
+                 ;; An entry that is missing a key is as unusable as no entry.
+                 (and encryption signing (cons encryption signing)))))
+           (lambda (key . args) #f))))
+    (if resolved
+        (values (car resolved) (cdr resolved))
+        (values (unresolved-key-placeholder)
+                (unresolved-key-placeholder)))))
+
 (define* (open-envelope #:key sealed encryption-key signing-key keyring
                         (enforce-expiry? #t) (now (current-time))
                         max-age-seconds)
@@ -489,8 +544,16 @@ on every field, and returning either #t or #f representing validity status."
    The envelope is opened with AES-256-GCM, whose tag also covers the rotation
    metadata (key id, created-at, expires-at): no plaintext is returned unless
    the tag verifies, so the metadata cannot be read as authentic before the
-   cipher has accepted it, and tampering is reported explicitly rather than
-   decrypted and then distrusted.
+   cipher has accepted it, and tampering is refused rather than decrypted and
+   then distrusted.
+
+   A refusal is deliberately unspecific. An unknown key id, a retired key, a
+   key that is not active yet, a wrong key and altered data all raise the same
+   error, and the attempt is made with a placeholder key rather than abandoned
+   early, so the work done is comparable too. See `envelope-refusal-message'.
+   Expiry is the one distinguishable case, because it is only reached once the
+   tag has proved the envelope genuine, and an operator needs to know that live
+   data merely went stale.
 
    #:key enforce-expiry?: when #t (the default) an envelope whose
                          @code{expires-at} is in the past is rejected.
@@ -510,25 +573,28 @@ on every field, and returning either #t or #f representing validity status."
              (string-join readable-seal-format-versions ", "))))
   (let* ((info (parse-envelope sealed))
          (key-id (assoc-ref info 'key-id))
-         (body (assoc-ref info 'body)))
-    (let-values (((effective-encryption-key effective-signing-key)
-                  (key-material #:keyring keyring #:key-id key-id
-                                #:encryption-key encryption-key
-                                #:signing-key signing-key
-                                #:now now)))
-      (unless effective-encryption-key
-        (error "open-envelope: no encryption key for this envelope."))
-      (unless effective-signing-key
-        (error "open-envelope: no signing key for this envelope."))
-      ;; The tag is checked while the body is opened, so a plaintext exists only
-      ;; once the metadata has proved authentic; the freshness checks therefore
-      ;; run on authenticated values.
-      (let ((plaintext (open-authenticated-body
-                        body effective-encryption-key effective-signing-key
-                        #:associated-data
-                        (string->utf8 (envelope-header info)))))
-        (check-envelope-freshness info enforce-expiry? now max-age-seconds)
-        plaintext))))
+         (body (assoc-ref info 'body))
+         ;; Resolving the keys and opening the body answer with the single
+         ;; refusal above. The freshness checks stay outside this catch on
+         ;; purpose: they run on values whose authenticity has already been
+         ;; established, so telling an operator "this expired" reveals nothing
+         ;; an attacker could not already see in the envelope's own header.
+         (plaintext
+          (catch #t
+            (lambda ()
+              (let-values (((encryption signing)
+                            (usable-key-material
+                             #:keyring keyring #:key-id key-id
+                             #:encryption-key encryption-key
+                             #:signing-key signing-key #:now now)))
+                ;; The tag is checked while the body is opened, so a plaintext
+                ;; exists only once the metadata has proved authentic.
+                (open-authenticated-body
+                 body encryption signing
+                 #:associated-data (string->utf8 (envelope-header info)))))
+            (lambda (key . args) (refuse-unreadable-envelope)))))
+    (check-envelope-freshness info enforce-expiry? now max-age-seconds)
+    plaintext))
 
 (define* (unsafe-generate-token #:key encryption-key signing-key keyring
                                 (key-id default-key-id)

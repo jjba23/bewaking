@@ -363,6 +363,97 @@
          (suffix (substring s (+ i 1) (string-length s))))
     (string-append prefix (string replacement) suffix)))
 
+(define (refusal-text thunk)
+  "Return the text of the error @var{thunk} raises, or the string \"(no error)\"
+   when it returns at all, so that two refusals can be compared with
+   =assert-equal= instead of merely both being known to raise."
+  (catch #t (lambda () (thunk) "(no error)")
+         (lambda args (format #f "~a" args))))
+
+;; ====== The refusal must not enumerate the keyring ======
+;;
+;; A key id travels in the clear, so an attacker can put any label in a token and
+;; watch how the attempt is refused. If an unknown label failed differently from
+;; a bad tag — or if the message merely named the label — the refusal would tell
+;; them which key ids a deployment configures. Every "we could not open this"
+;; cause therefore has to produce one identical answer.
+
+(define atomic-keyring
+  '( ("2026a" (encryption-key . "enc-2026a-a")
+               (signing-key . "sig-2026a-a"))))
+
+(define (keyring-with-window extra)
+  `(("2026a" (encryption-key . "enc-2026a-a")
+             (signing-key . "sig-2026a-a")
+             ,@extra)))
+
+(define (keyring-sealed-object)
+  (encrypt-object #:payload '((v . 1)) #:keyring atomic-keyring
+                  #:key-id "2026a"))
+
+(define (relabel-key-id sealed key-id)
+  "Return @var{sealed} with its key id replaced by @var{key-id}, as an attacker
+   probing with a made-up label would."
+  (string-replace-substring sealed "BWK3.2026a."
+                            (string-append "BWK3." key-id ".")))
+
+(define (open-by-keyring sealed keyring now)
+  (open-envelope #:sealed sealed #:keyring keyring #:now now))
+
+(define (key-id-nobody-configured)
+  "a-label-nobody-configured")
+
+(define (unknown-key-id-refusal)
+  (refusal-text
+   (lambda ()
+     (open-by-keyring (relabel-key-id (keyring-sealed-object)
+                                      (key-id-nobody-configured))
+                      atomic-keyring 1000))))
+
+(define (missing-entry-refusal)
+  (refusal-text
+   (lambda ()
+     (open-by-keyring (keyring-sealed-object)
+                      '( ("other" (encryption-key . "e")
+                                  (signing-key . "s")))
+                      1000))))
+
+(define (retired-key-refusal)
+  (refusal-text
+   (lambda ()
+     (open-by-keyring (keyring-sealed-object)
+                      (keyring-with-window '((not-after . 1000)))
+                      2000))))
+
+(define (inactive-key-refusal)
+  (refusal-text
+   (lambda ()
+     (open-by-keyring (keyring-sealed-object)
+                      (keyring-with-window '((not-before . 9999999999)))
+                      1))))
+
+(define (tampered-body-refusal)
+  (let ((sealed (keyring-sealed-object)))
+    (refusal-text
+     (lambda ()
+       (open-envelope
+        #:sealed (tamper-hex-at sealed (quotient (string-length sealed) 2))
+        #:keyring atomic-keyring #:now 1000)))))
+
+(define (expired-refusal)
+  ;; The deliberate exception: this is only reached once the tag has proved the
+  ;; envelope genuine, so an operator can be told that live data went stale
+  ;; without telling an attacker anything the header does not already show.
+  (refusal-text
+   (lambda ()
+     (open-envelope
+      #:sealed (seal-envelope #:plaintext "x"
+                              #:encryption-key some-valid-encryption-key
+                              #:signing-key some-valid-signing-key
+                              #:expires-at 1000)
+      #:encryption-key some-valid-encryption-key
+      #:signing-key some-valid-signing-key))))
+
 (define (sealed-envelope-example)
   (seal-envelope #:plaintext "top secret payload"
                  #:encryption-key some-valid-encryption-key
@@ -669,7 +760,40 @@
                                                      some-valid-encryption-key
                                                      #:signing-key
                                                      some-valid-signing-key))
-                             #:name "equal objects seal to different strings"))))
+                             #:name "equal objects seal to different strings"))
+         (test "a refusal never says which key id the keyring configures"
+               ;; One message covers every cause, so nothing about the keyring can
+               ;; be read off how a token is refused. The first assertion keeps
+               ;; the rest honest: without it, every comparison below would also
+               ;; hold if the opens had silently *succeeded* and returned the
+               ;; sentinel instead of a refusal.
+               (assert-true (and (string-contains (unknown-key-id-refusal)
+                                                  "could not be opened")
+                                 #t)
+                            #:name "the refusal is a refusal, not an accidental success")
+               (assert-equal #:expect (unknown-key-id-refusal)
+                             #:got (tampered-body-refusal)
+                             #:name "an unknown key id and a tampered body fail identically")
+               (assert-equal #:expect (unknown-key-id-refusal)
+                             #:got (missing-entry-refusal)
+                             #:name "a keyring with no matching entry fails identically")
+               (assert-equal #:expect (unknown-key-id-refusal)
+                             #:got (retired-key-refusal)
+                             #:name "a retired key fails identically")
+               (assert-equal #:expect (unknown-key-id-refusal)
+                             #:got (inactive-key-refusal)
+                             #:name "a key that is not active yet fails identically")
+               (assert-false (string-contains (unknown-key-id-refusal)
+                                              (key-id-nobody-configured))
+                             #:name "the refusal does not name the key id it could not resolve")
+               (assert-false (string-contains (unknown-key-id-refusal) "2026a")
+                             #:name "and it does not name a configured key id either")
+               (assert-false (string-contains (unknown-key-id-refusal) "enc-2026a-a")
+                             #:name "nor does it carry any key material")
+               ;; Expiry stays the one exception: it is only reached once the tag
+               ;; has proved the envelope genuine.
+               (assert-false (string=? (unknown-key-id-refusal) (expired-refusal))
+                             #:name "an expired genuine envelope is still told apart, since it authenticated first"))))
 
 ;; ====== Envelope metadata (rotation policy and audit) ======
 

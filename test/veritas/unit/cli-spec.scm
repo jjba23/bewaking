@@ -17,6 +17,7 @@
 
 (define-module (veritas unit cli-spec)
   #:use-module (veritas veritas)
+  #:use-module (ice-9 string-fun)
   #:use-module (bewaking cli)
   #:use-module (bewaking password))
 
@@ -42,6 +43,60 @@
 
 (define (cli-out result) (car result))
 (define (cli-code result) (cdr result))
+
+(define (run-cli-with-error args)
+  "Run the CLI with @var{args} and return a list of (standard output, standard
+   error, exit code), so a test can compare what an operator — or an attacker
+   reading a response and its status — actually sees. =run-cli= discards
+   standard error, which is exactly where a refusal is reported."
+  (let ((code (make-vector 1 #f))
+        (errors (make-vector 1 #f)))
+    (let ((output (with-output-to-string
+                    (lambda ()
+                      (vector-set! errors 0
+                                   (with-error-to-string
+                                    (lambda ()
+                                      (vector-set! code 0 (run args)))))))))
+      (list output (vector-ref errors 0) (vector-ref code 0)))))
+
+(define (cli-refusal-state args)
+  "The standard-error-and-exit-code pair a command produces, which is the whole
+   of what a failure exposes."
+  (let ((result (run-cli-with-error args)))
+    (list (list-ref result 1) (list-ref result 2))))
+
+(define (cli-key-id-refusals-are-uniform?)
+  ;; A token sealed under one key id, opened through a keyring that knows only
+  ;; that key id: once with an edited body, once with the key id relabelled to
+  ;; one that keyring has never heard of. An operator must not be able to tell
+  ;; those apart, because neither may an attacker: the difference would list the
+  ;; key ids the deployment configures.
+  (let ((keyring-file (temp-path)))
+    (call-with-output-file keyring-file
+      (lambda (port)
+        (write `(("2026a" (encryption-key . ,encryption-key)
+                          (signing-key . ,signing-key)))
+               port)))
+    (let* ((generated (run-cli (list "token" "generate"
+                                     "--owner-id" "o1"
+                                     "--keyring" keyring-file
+                                     "--key-id" "2026a")))
+           (token (string-trim-right (cli-out generated)))
+           (tampered (flip-hex-digit token (quotient (string-length token) 2)))
+           (relabelled (string-replace-substring
+                        token "BWK3.2026a." "BWK3.a-label-nobody-configured."))
+           (with-edited-body
+            (cli-refusal-state (list "token" "decrypt" "--token" tampered
+                                     "--keyring" keyring-file)))
+           (with-unknown-key-id
+            (cli-refusal-state (list "token" "decrypt" "--token" relabelled
+                                     "--keyring" keyring-file))))
+      (delete-file keyring-file)
+      (and (= 0 (cli-code generated))
+           (equal? with-edited-body with-unknown-key-id)
+           (= 1 (cadr with-edited-body))
+           (not (string-contains (car with-edited-body)
+                                 "a-label-nobody-configured"))))))
 
 (define (temp-path)
   (string-append "/tmp/bewaking-cli-"
@@ -430,7 +485,10 @@
                (assert-true (missing-owner-id-refused?)
                             #:name "generating without an owner id exits with 1")
                (assert-true (object-without-keys-refused?)
-                            #:name "sealing an object without keys exits with 1"))))
+                            #:name "sealing an object without keys exits with 1"))
+         (test "a refusal does not reveal which key ids the keyring configures"
+               (assert-true (cli-key-id-refusals-are-uniform?)
+                            #:name "an unknown key id and an edited body give the same message and exit code"))))
 
 (define (spec)
   (veritas-run dispatch-suite token-suite object-suite password-suite
