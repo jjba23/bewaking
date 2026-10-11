@@ -27,7 +27,12 @@
 ;;   - PBKDF2-HMAC-SHA256 uses the widely published password/salt vectors and
 ;;     one vector cross-checked with `openssl kdf';
 ;;   - the AES-256-CBC vectors were produced by OpenSSL 3.5 and are checked in
-;;     both directions, so bewaking and `openssl enc' stay interchangeable.
+;;     both directions, so bewaking and `openssl enc' stay interchangeable;
+;;   - the AES-256-GCM payloads were produced by Python's `cryptography' and are
+;;     matched byte for byte, under both key derivations;
+;;   - Argon2id uses the test vector of RFC 9106, Section 5.3, which pins the
+;;     parameter order, the lane count and the variant, none of which the
+;;     implementation could tell us about itself.
 ;;
 ;; None of these tests shells out, so the suite runs with no external tools
 ;; installed.
@@ -55,6 +60,103 @@
 (define (raises? thunk)
   "Return #t when calling the zero-argument @var{thunk} raises, else #f."
   (catch #t (lambda () (thunk) #f) (lambda args #t)))
+
+;; A cheap Argon2id specification, so the suite stays fast: the cost of a
+;; derivation is a property of the parameters, not of the code path.
+(define cheap-argon2id
+  '((kdf . argon2id) (memory-kib . 8192) (iterations . 1) (parallelism . 1)))
+
+(define argon2id-suite
+  (suite "Argon2id key derivation (RFC 9106)"
+         (test "the RFC 9106 Argon2id vector is reproduced"
+               ;; P = 32 x 01, S = 16 x 02, K = 8 x 03, X = 12 x 04,
+               ;; p = 4, T = 32, m = 32 KiB, t = 3.
+               (assert-equal #:expect
+                             "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+                             #:got
+                             (bytes->base16
+                              (argon2id-derive (make-string 32 (integer->char 1))
+                                               (make-bytevector 16 2) 32
+                                               #:memory-kib 32 #:iterations 3
+                                               #:parallelism 4
+                                               #:secret (make-bytevector 8 3)
+                                               #:associated-data
+                                               (make-bytevector 12 4)))
+                             #:name "password 32x01, salt 16x02, secret 8x03, data 12x04, m=32, t=3, p=4"))
+         (test "every parameter changes the derived bytes"
+               (assert-false (equal? (argon2id-derive "key" (make-bytevector 16 1) 32
+                                                       #:memory-kib 8192 #:iterations 1)
+                                     (argon2id-derive "key" (make-bytevector 16 1) 32
+                                                       #:memory-kib 8192 #:iterations 2))
+                             #:name "a different pass count gives a different tag")
+               (assert-false (equal? (argon2id-derive "key" (make-bytevector 16 1) 32
+                                                       #:memory-kib 8192)
+                                     (argon2id-derive "key" (make-bytevector 16 2) 32
+                                                       #:memory-kib 8192))
+                             #:name "a different salt gives a different tag")
+               (assert-false (equal? (argon2id-derive "key" (make-bytevector 16 1) 32
+                                                       #:memory-kib 8192)
+                                     (argon2id-derive "other" (make-bytevector 16 1) 32
+                                                       #:memory-kib 8192))
+                             #:name "a different passphrase gives a different tag"))
+         (test "invalid parameters are rejected"
+               (assert-true (raises? (lambda ()
+                                       (argon2id-derive "key" (make-bytevector 16 1)
+                                                        32 #:memory-kib 4)))
+                            #:name "less than 8 KiB per lane is refused")
+               (assert-true (raises? (lambda ()
+                                       (argon2id-derive "key" (make-bytevector 16 1)
+                                                        32 #:iterations 0)))
+                            #:name "zero passes is refused")
+               (assert-true (raises? (lambda ()
+                                       (argon2id-derive "key" (make-bytevector 16 1)
+                                                        32 #:parallelism 0)))
+                            #:name "zero lanes is refused")
+               (assert-true (raises? (lambda ()
+                                       (argon2id-derive "key" (make-bytevector 16 1)
+                                                        32 #:memory-kib "lots")))
+                            #:name "a non-integer memory cost is refused")
+               (assert-true (raises? (lambda ()
+                                       (argon2id-derive "key" (make-bytevector 16 1)
+                                                        32 #:secret "not-bytes")))
+                            #:name "a non-bytevector secret is refused")
+               (assert-true (argon2id-available?)
+                            #:name "this libgcrypt provides Argon2"))))
+
+(define kdf-spec-suite
+  (suite "Key-derivation specifications"
+         (test "the default is PBKDF2 with its fixed cost"
+               (assert-equal #:expect 'pbkdf2 #:got (kdf-name default-kdf)
+                             #:name "the module default names PBKDF2")
+               (assert-equal #:expect 10000
+                             #:got (assoc-ref (kdf-spec 'pbkdf2) 'iterations)
+                             #:name "its iteration count is the OpenSSL one"))
+         (test "Argon2id defaults are filled in and reported"
+               (assert-equal #:expect
+                             '((kdf . argon2id) (memory-kib . 65536)
+                               (iterations . 3) (parallelism . 1))
+                             #:got (kdf-spec 'argon2id)
+                             #:name "the defaults are 64 MiB, 3 passes, 1 lane")
+               (assert-equal #:expect
+                             '((kdf . argon2id) (memory-kib . 262144)
+                               (iterations . 4) (parallelism . 1))
+                             #:got (kdf-spec '((kdf . argon2id)
+                                               (memory-kib . 262144)
+                                               (iterations . 4)))
+                             #:name "given parameters are kept and the rest defaulted"))
+         (test "unsupported specifications are refused"
+               (assert-true (raises? (lambda () (kdf-spec 'scrypt)))
+                            #:name "an unknown KDF name is refused")
+               (assert-true (raises? (lambda () (kdf-spec "pbkdf2")))
+                            #:name "a string is not a KDF specification")
+               (assert-true (raises? (lambda ()
+                                       (kdf-spec '((kdf . pbkdf2)
+                                                   (iterations . 5000)))))
+                            #:name "a PBKDF2 cost the OpenSSL format cannot record is refused")
+               (assert-true (raises? (lambda ()
+                                       (kdf-spec '((kdf . argon2id)
+                                                   (memory-kib . 4)))))
+                            #:name "an out-of-range Argon2id memory cost is refused"))))
 
 (define base16-suite
   (suite "Base16 encoding"
@@ -239,6 +341,240 @@
                             encryption-key)))
                 #:name "a truncated body raises rather than returning garbage"))))
 
+(define (sealed-with-argon2id)
+  "An Argon2id sealed payload with a fixed salt, for inspecting its layout."
+  (kdf-encrypt "a payload" encryption-key #:kdf cheap-argon2id
+               #:salt (make-bytevector 16 9)))
+
+(define (sealed-with-default-kdf)
+  (kdf-encrypt "bewaking" encryption-key #:kdf 'pbkdf2
+               #:salt openssl-fixed-salt))
+
+(define (recorded-header blob)
+  ;; R6RS bytevector-copy takes no range, so copy the header out by hand.
+  (let ((header (make-bytevector 8 0)))
+    (bytevector-copy! (base64->bytes blob) 0 header 0 8)
+    (utf8->string header)))
+
+(define (recorded-u32 blob offset)
+  (bytevector-uint-ref (base64->bytes blob) offset (endianness big) 4))
+
+(define (tampered-argon2id-blob)
+  "The sealed payload with its recorded pass count changed, which must not be
+   silently accepted as another valid derivation."
+  (let ((raw (base64->bytes (sealed-with-argon2id))))
+    (bytevector-u8-set! raw 31 (logxor 1 (bytevector-u8-ref raw 31)))
+    (bytes->base64 raw)))
+
+(define (argon2id-blob-opens?)
+  (string=? "a payload" (kdf-decrypt (sealed-with-argon2id) encryption-key)))
+
+(define (argon2id-blob-rejects-wrong-key?)
+  (raises? (lambda () (kdf-decrypt (sealed-with-argon2id) "another-key"))))
+
+(define (openssl-reader-refuses-argon2id?)
+  (raises? (lambda () (openssl-decrypt (sealed-with-argon2id) encryption-key))))
+
+(define (kdf-reader-opens-openssl-blobs?)
+  (string=? openssl-random-salt-plaintext
+            (kdf-decrypt openssl-random-salt-blob encryption-key)))
+
+(define sealed-payload-suite
+  (suite "Sealed payloads (key derivation is recorded)"
+         (test "the default KDF keeps the OpenSSL layout byte for byte"
+               (assert-true (string=? openssl-fixed-blob (sealed-with-default-kdf))
+                            #:name "a fixed-salt PBKDF2 payload equals OpenSSL's own output"))
+         (test "an Argon2id payload records its derivation and parameters"
+               (assert-equal #:expect "Argon2id"
+                             #:got (recorded-header (sealed-with-argon2id))
+                             #:name "the header names the derivation")
+               (assert-equal #:expect 8192
+                             #:got (recorded-u32 (sealed-with-argon2id) 24)
+                             #:name "the memory cost is recorded, in KiB")
+               (assert-equal #:expect 1
+                             #:got (recorded-u32 (sealed-with-argon2id) 28)
+                             #:name "the pass count is recorded")
+               (assert-equal #:expect 1
+                             #:got (recorded-u32 (sealed-with-argon2id) 32)
+                             #:name "the lane count is recorded"))
+         (test "an Argon2id payload round-trips and resists the wrong key"
+               (assert-true (argon2id-blob-opens?)
+                            #:name "the same key opens it")
+               (assert-true (argon2id-blob-rejects-wrong-key?)
+                            #:name "another key does not"))
+         (test "tampering with the recorded parameters is not honoured"
+               (assert-true (raises? (lambda ()
+                                       (kdf-decrypt (tampered-argon2id-blob)
+                                                    encryption-key)))
+                            #:name "a changed pass count no longer decrypts"))
+         (test "both readers keep their contracts"
+               (assert-true (openssl-reader-refuses-argon2id?)
+                            #:name "openssl-decrypt refuses what the OpenSSL CLI could not read")
+               (assert-true (kdf-reader-opens-openssl-blobs?)
+                            #:name "kdf-decrypt opens payloads produced by OpenSSL"))
+         (test "sizes and headers are validated"
+               (assert-true (raises? (lambda ()
+                                       (kdf-encrypt "x" encryption-key
+                                                    #:kdf 'argon2id
+                                                    #:salt (make-bytevector 8 1))))
+                            #:name "an 8-byte Argon2id salt is refused")
+               (assert-true (raises? (lambda ()
+                                       (kdf-encrypt "x" encryption-key
+                                                    #:kdf 'pbkdf2
+                                                    #:salt (make-bytevector 16 1))))
+                            #:name "a 16-byte PBKDF2 salt is refused")
+               (assert-true (raises? (lambda ()
+                                       (kdf-decrypt
+                                        (bytes->base64 (string->utf8 "NoSuch__header"))
+                                        encryption-key)))
+                            #:name "a payload with no known header is refused"))))
+
+;; ====== Authenticated payloads (AES-256-GCM) ======
+;;
+;; The two reference payloads below were produced by an independent
+;; implementation: Python's `cryptography', AESGCM over PBKDF2-HMAC-SHA256 and
+;; over Argon2id, with the same salt, nonce and associated data. Matching them
+;; byte for byte pins the container layout, the order of the derivation and the
+;; tag, none of which a check against bewaking itself could pin.
+
+(define gcm-salt
+  (make-bytevector 16 7))
+
+(define gcm-nonce
+  (make-bytevector 12 9))
+
+(define gcm-associated-data
+  "BWK3.default.1791715315.-")
+
+(define gcm-plaintext
+  "the plaintext of an authenticated payload")
+
+(define gcm-pbkdf2-payload
+  (string-append
+   "010707070707070707070707070707070709090909090909090909090915"
+   "d0ed647041883a00a39c1a98153992e43396ca2ef78f30cf603552820a8e"
+   "d81e320d38a87aee14ad4a7f41b2df7b369d6614500294e59e58"
+   ""))
+
+(define gcm-argon2id-payload
+  (string-append
+   "020000200000000001000000010707070707070707070707070707070709"
+   "090909090909090909090996b424d50c29974261cc56650752a5237f7528"
+   "271202d70046f0bc49c8c0bfefb86150c0b946a554a1590bec6d5f03409b"
+   "bff197af7d782651"))
+
+(define (sealed-authenticated-payload kdf)
+  (gcm-encrypt (string->utf8 gcm-plaintext) encryption-key
+               #:kdf kdf #:salt gcm-salt #:nonce gcm-nonce
+               #:associated-data (string->utf8 gcm-associated-data)))
+
+(define* (authenticated-payload-open? sealed
+                                     #:optional (associated-data gcm-associated-data))
+  (string=? gcm-plaintext
+            (utf8->string (gcm-decrypt sealed encryption-key
+                                       #:associated-data
+                                       (string->utf8 associated-data)))))
+
+(define* (authenticated-payload-refused? sealed
+                                         #:key (associated-data gcm-associated-data)
+                                               (key encryption-key))
+  (raises? (lambda ()
+             (gcm-decrypt sealed key
+                          #:associated-data (string->utf8 associated-data)))))
+
+(define (authenticated-payload-byte sealed offset)
+  (bytevector-u8-ref (base16->bytes sealed) offset))
+
+(define (authenticated-payload-u32 sealed offset)
+  (bytevector-uint-ref (base16->bytes sealed) offset (endianness big) 4))
+
+(define (flipped-hex-digit sealed index)
+  "Return @var{sealed} with the hexadecimal digit at @var{index} replaced by a
+   different one, to simulate tampering."
+  (let* ((character (string-ref sealed index))
+         (replacement (if (char=? character #\0) #\1 #\0)))
+    (string-append (substring sealed 0 index)
+                   (string replacement)
+                   (substring sealed (+ index 1) (string-length sealed)))))
+
+(define authenticated-payload-suite
+  (suite "Authenticated payloads (AES-256-GCM)"
+         (test "the payload is byte for byte the reference implementation's"
+               (assert-equal
+                #:expect gcm-pbkdf2-payload
+                #:got (sealed-authenticated-payload 'pbkdf2)
+                #:name "PBKDF2-HMAC-SHA256, as Python's cryptography seals it")
+               (assert-equal
+                #:expect gcm-argon2id-payload
+                #:got (sealed-authenticated-payload cheap-argon2id)
+                #:name "Argon2id with its parameters recorded, likewise"))
+         (test "the payload records which derivation to use"
+               (assert-equal #:expect 1
+                             #:got (authenticated-payload-byte
+                                    (sealed-authenticated-payload 'pbkdf2) 0)
+                             #:name "PBKDF2 is identified by its own id")
+               (assert-equal #:expect 2
+                             #:got (authenticated-payload-byte
+                                    (sealed-authenticated-payload cheap-argon2id) 0)
+                             #:name "Argon2id is identified by a different id")
+               (assert-equal #:expect 8192
+                             #:got (authenticated-payload-u32
+                                    (sealed-authenticated-payload cheap-argon2id) 1)
+                             #:name "the memory cost is recorded, in KiB")
+               (assert-equal #:expect 1
+                             #:got (authenticated-payload-u32
+                                    (sealed-authenticated-payload cheap-argon2id) 5)
+                             #:name "the pass count is recorded")
+               (assert-equal #:expect 1
+                             #:got (authenticated-payload-u32
+                                    (sealed-authenticated-payload cheap-argon2id) 9)
+                             #:name "the lane count is recorded"))
+         (test "fresh salt and nonce still round-trip"
+               (assert-true (authenticated-payload-open?
+                             (sealed-authenticated-payload 'pbkdf2))
+                            #:name "a payload sealed with random salt and nonce opens")
+               (assert-true (authenticated-payload-open?
+                             (sealed-authenticated-payload cheap-argon2id))
+                            #:name "and so does an Argon2id one")
+               (assert-true (authenticated-payload-open?
+                             (gcm-encrypt (string->utf8 gcm-plaintext) encryption-key)
+                             "")
+                            #:name "associated data is optional: empty means none")
+               (assert-true (authenticated-payload-refused?
+                             (gcm-encrypt (string->utf8 gcm-plaintext) encryption-key))
+                            #:name "a payload sealed without it does not open with it"))
+         (test "the tag refuses every alteration"
+               ;; Digits: 0-1 are the derivation id, 2-33 the salt, 34-57 the
+               ;; nonce, then the ciphertext, then the 32 digits of the tag.
+               (assert-true (authenticated-payload-refused?
+                             (flipped-hex-digit gcm-pbkdf2-payload 60))
+                            #:name "a flipped ciphertext digit is refused")
+               (assert-true (authenticated-payload-refused?
+                             (flipped-hex-digit gcm-pbkdf2-payload
+                                               (- (string-length gcm-pbkdf2-payload) 1)))
+                            #:name "a flipped tag digit is refused")
+               (assert-true (authenticated-payload-refused?
+                             (flipped-hex-digit gcm-pbkdf2-payload 0))
+                            #:name "an unknown key-derivation id is refused, not guessed at")
+               (assert-true (authenticated-payload-refused?
+                             gcm-pbkdf2-payload
+                             #:associated-data "BWK3.default.1791715316.-")
+                            #:name "different associated data is refused")
+               (assert-true (authenticated-payload-refused?
+                             gcm-pbkdf2-payload #:key "another-key")
+                            #:name "the wrong key is refused")
+               (assert-true (authenticated-payload-refused?
+                             (substring gcm-pbkdf2-payload 0 40))
+                            #:name "a truncated payload is refused"))
+         (test "hexadecimal that stands for bytes decodes to bytes"
+               (assert-true (bytevector? (base16->bytes "00ff"))
+                            #:name "base16->bytes returns a bytevector")
+               (assert-equal #:expect 255
+                             #:got (bytevector-u8-ref (base16->bytes "00ff") 1)
+                             #:name "and keeps the raw octets, which base16-decode cannot"))))
+
 (define (spec)
   (veritas-run base16-suite base64-suite hmac-suite pbkdf2-suite
+               argon2id-suite kdf-spec-suite sealed-payload-suite
+               authenticated-payload-suite
                openssl-compatibility-suite))

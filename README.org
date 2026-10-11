@@ -20,10 +20,11 @@ If you like my work, please support me by [[https://bmc.link/jjbigorra][buying m
 
 /bewaking/ means surveillance in the Dutch language.
 
-All of its cryptography — AES-256-CBC, PBKDF2, HMAC-SHA256, Base16 and Base64 — runs
-inside the Guile process. bewaking spawns no subprocesses, so it needs no
-external command-line tools, and the wire format it produces is byte-for-byte
-the one ~openssl enc -aes256 -pbkdf2~ produces.
+All of its cryptography — AES-256-CBC, AES-256-GCM, PBKDF2, Argon2id,
+HMAC-SHA256, Base16 and Base64 — runs inside the Guile process. bewaking spawns
+no subprocesses, so it needs no external command-line tools, and the payload
+layout it produces is byte-for-byte the one ~openssl enc -aes256 -pbkdf2~
+produces.
 
 You can find the technical Guile Scheme API documentation for Bewaking here:
 
@@ -62,6 +63,10 @@ PKCS#7 padding. Data sealed by the OpenSSL CLI before this changed, or by any
 other implementation of that format, still opens. The corresponding reference
 values live in the test suite, so the compatibility is checked without needing
 OpenSSL installed.
+
+That layout is what a whole BWK1 or BWK2 body looks like, and it is still the
+inner layer of every BWK3 body: sealing has kept the CBC layer and replaced the
+outer AES-CBC stage with AES-256-GCM.
 
 ** Development and testing dependencies
 
@@ -245,7 +250,7 @@ catch errors, print a message, and return =#f=.
 
 | Function                        | Arguments                                                                  | Returns                                     |
 |---------------------------------+----------------------------------------------------------------------------+---------------------------------------------|
-| ~generate-token~                | =#:encryption-key=, =#:signing-key=, =#:get-owner-details=, =#:token-validity-seconds=, =#:key-id=, =#:mac-key=, =#:keyring=, =#:ttl-seconds=, =#:expires-at= | token string, or =#f= on failure            |
+| ~generate-token~                | =#:encryption-key=, =#:signing-key=, =#:get-owner-details=, =#:token-validity-seconds=, =#:key-id=, =#:keyring=, =#:ttl-seconds=, =#:expires-at= | token string, or =#f= on failure            |
 | ~decrypt-token~                 | =#:token=, =#:encryption-key=, =#:signing-key=, =#:mac-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds= | payload alist, or =#f= on failure           |
 | ~unsafe-generate-token~         | same as ~generate-token~                                                    | token string (raises on failure)            |
 | ~unsafe-decrypt-token~          | same as ~decrypt-token~                                                     | payload alist (raises on failure)           |
@@ -253,6 +258,11 @@ catch errors, print a message, and return =#f=.
 | ~is-token-expired?~             | =#:token=                                                                   | =#t= when =token-expires-at= is in the past |
 | ~token-remaining-seconds~       | =#:token=                                                                   | seconds left (negative once expired)        |
 | ~token-valid?~                  | =#:token=                                                                   | =#t= when well-formed *and* unexpired       |
+
+=#:mac-key= appears on the *opening* functions only. Version 3 has no MAC — the
+cipher tag is the integrity check — so ~generate-token~ has no such option,
+while reading a BWK1 or BWK2 envelope still uses the MAC key it was sealed with
+(by default one derived from the signing key).
 
 *** Checking a token's lifetime
 
@@ -309,36 +319,69 @@ therefore cannot execute code during decryption.
 
 * Versioned and authenticated seals
 
-Sealed tokens and objects are wrapped in a self-describing, integrity-protected
-envelope whose header also carries *rotation metadata*:
+Sealed tokens and objects are wrapped in a self-describing envelope whose header
+also carries *rotation metadata*:
 
 #+begin_src text
-BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
+BWK3.<key-id>.<created-at>.<expires-at>.<body>
 #+end_src
 
-- =BWK2= — the *format version tag*. It leaves room for the format to evolve:
-  only the current version is accepted, and anything else is refused rather than
-  guessed at.
+- =BWK3= — the *format version tag*. It leaves room for the format to evolve,
+  and says which integrity mechanism the envelope uses.
 - =<key-id>= — a short label identifying which key sealed the data (default
   =“default”). It enables [[#key-rotation][key rotation]].
 - =<created-at>= — the Unix timestamp (seconds) at which the data was sealed.
 - =<expires-at>= — the Unix timestamp after which the data must not be opened,
   or =-= when it never expires.
-- =<body>= — the double-encrypted, garbled, Base16 payload produced by the core
-  pipeline described above.
-- =<mac>= — the hexadecimal HMAC-SHA256 of the *whole header and body*, keyed by
-  the *MAC key*.
+- =<body>= — the authenticated sealed payload described below.
 
-The MAC is verified *before* any decryption is attempted, so tampering is
-reported explicitly — =integrity check failed= — instead of surfacing as a
-confusing decryption error or as silent corruption. A payload that is not a
-current-version envelope, such as an older =BWK1= envelope or a pre-versioning
-bare Base16 token, is refused with =not a BWK2 envelope= instead of being
-decrypted on a guess. Because the MAC covers the metadata, =key-id=,
-=created-at= and =expires-at= can be trusted once verified and *audited without
-any key* through ~envelope-metadata~. By default the MAC key is derived from the
-signing key with a fixed domain-separation suffix, so no extra key is required;
-pass =#:mac-key= when you want strict key separation.
+** Authenticity from the cipher, not from a separate MAC
+
+The body is sealed with *AES-256-GCM*, under a key derived from the signing key.
+The four header fields above are passed to the cipher as *associated data*, so
+the one authentication tag covers the ciphertext *and* the metadata:
+
+#+begin_src text
+body = kdf-id(1) | salt(16) | nonce(12) | ciphertext | tag(16)     (Base16)
+#+end_src
+
+Only the two keys are needed — there is no MAC field, no MAC key, and no second
+key to provision or rotate. Two properties follow from binding the header to the
+cipher:
+
+- The header cannot be *read as authentic* before the cipher accepts it.
+  ~open-envelope~ decrypts with the tag check built into the operation, so a
+  plaintext exists only once authenticity is established; altering =key-id=,
+  =created-at= or =expires-at= — including extending an expiry — makes the tag
+  fail rather than changing what the envelope means.
+- Tampering is reported as =GCM authentication failed=, not as a confusing
+  decryption error or silent corruption. A wrong key looks the same, which is
+  exactly what a tag is for.
+
+Because the metadata is authenticated, =key-id=, =created-at= and =expires-at=
+can still be *audited without any key* through ~envelope-metadata~, which is what
+makes log review and rotation tooling possible. Reading the metadata is not the
+same as trusting it: ~open-envelope~ is the only place that decides.
+
+*** Versions 1 and 2 are still read
+
+Two earlier formats keep opening, so data sealed before this version does not
+have to be re-issued:
+
+#+begin_src text
+BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
+BWK1.<key-id>.<body>.<mac>
+#+end_src
+
+Both authenticate with an HMAC-SHA256 =<mac>= over their header and body instead
+of a cipher tag, and BWK1 carries no timestamps at all. Opening a BWK1 or BWK2
+envelope still verifies its MAC *before* decrypting, and still honours the MAC
+key it was sealed with (=#:mac-key=, by default derived from the signing key).
+Only BWK3 is *produced*: sealing needs no MAC key, and ~seal-envelope~ has none.
+A pre-versioning bare Base16 token, arbitrary text, or an envelope whose version
+is not one of the three is refused, with a message naming what was expected:
+=not a bewaking envelope (expected BWK3, BWK2, BWK1)=. The readable versions are
+exposed as ~readable-seal-format-versions~.
 
 ** Rotation metadata: expiry and audit
 
@@ -355,7 +398,7 @@ adds a blanket “nothing older than this” policy:
 
 ;; Audit the header with no key at all — useful for tooling and log review.
 (envelope-metadata #:sealed sealed)
-;; => ((version . "BWK2") (key-id . "2026a")
+;; => ((version . "BWK3") (key-id . "2026a")
 ;;     (created-at . 1791709670) (expires-at . 1791796070))
 
 (envelope-expired? #:sealed sealed)                 ; => #f while it is live
@@ -372,8 +415,8 @@ exist for recovery and audit: they open expired data instead of refusing it.
 
 | Function              | Arguments                                                                                                  | Returns                                        |
 |-----------------------+------------------------------------------------------------------------------------------------------------+------------------------------------------------|
-| ~seal-envelope~       | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:mac-key=, =#:created-at=, =#:expires-at=, =#:ttl-seconds= | envelope string               |
-| ~open-envelope~       | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:mac-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry) |
+| ~seal-envelope~       | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:created-at=, =#:expires-at=, =#:ttl-seconds= | envelope string               |
+| ~open-envelope~       | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:mac-key= (older envelopes only), =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry) |
 | ~sealed-envelope?~    | =sealed=                                                                                                    | =#t= when it is a versioned envelope          |
 | ~envelope-metadata~   | =#:sealed=                                                                                                  | alist of version/key-id/created-at/expires-at |
 | ~envelope-expired?~   | =#:sealed=, =#:now=                                                                                         | =#t= when the recorded expiry has passed      |
@@ -434,15 +477,18 @@ data to the lifetime of the key that protects it. The command line reports the
 precise reason for a refusal, so a failed open tells you whether the data
 expired or the key was retired.
 
-*** Producing and reading a single version
+*** Producing one version, reading three
 
-Only the current format version is produced, and only the current format version
-is read. An older envelope receives the same treatment as arbitrary text: it is
-refused, with a message saying so, rather than being decrypted on a guess. Data
-sealed before the envelope existed (a bare Base16 string with no dots) is
-refused for the same reason. If you are upgrading an installation that holds
-tokens in an older format, re-issue them: the payload is only ever as durable as
-the key material, and a fresh token is one ~generate-token~ call away.
+BWK3 is the only version produced; BWK1, BWK2 and BWK3 are all read, so data
+sealed by an earlier release keeps opening. Nothing needs re-issuing or
+migrating: an old token is still a working token, and the key id inside it still
+selects its key from the keyring. What is *not* read is data that predates the
+versioned envelope (a bare Base16 string with no dots): it carries no tag or MAC
+at all, so accepting it would mean decrypting on a guess. Such a token is refused
+with a message saying so, and re-issuing it is one ~generate-token~ call away.
+Envelopes of the three versions are told apart by their version tag alone, so
+there is no auto-detection to be fooled; the formats are not interchangeable,
+and a body sealed for one version does not open under another's header.
 
 ----------------
 
@@ -521,7 +567,7 @@ TOKEN=$(./bin/bewaking token generate --owner-id o1 \
 
 # Audit the header with no keys at all.
 ./bin/bewaking token inspect --token "$TOKEN"
-# version:    BWK2
+# version:    BWK3
 # key-id:     default
 # created-at: 1791709670
 # expires-at: 1791713270
@@ -615,17 +661,25 @@ shell to quote against, and no ~PATH~ to depend on.
 | ~openssl-decrypt~         | =#:ciphertext=, =#:key=                              | the original string (raises on bad padding)     |
 | ~hmac-sha256-hex~         | =key=, =message=                                     | lowercase hexadecimal HMAC-SHA256               |
 | ~pbkdf2-sha256~           | =password=, =salt=, =length=, =#:iterations=          | the derived bytes as a bytevector               |
+| ~argon2id-derive~         | =password=, =salt=, =length=, =#:memory-kib=, =#:iterations=, =#:parallelism= | the derived bytes as a bytevector |
+| ~derive-key-material~     | =kdf=, =password=, =salt=, =length=                 | the derived bytes, for any KDF in ~kdf-spec~    |
+| ~kdf-encrypt~ / ~kdf-decrypt~ | =plaintext=, =key=, =#:kdf=, =#:salt=             | the self-describing CBC blob / the plaintext    |
+| ~gcm-encrypt~ / ~gcm-decrypt~ | =plaintext=, =key=, =#:kdf=, =#:salt=, =#:nonce=, =#:associated-data= (decrypt: =sealed=, =key=, =#:associated-data=) | the Base16 authenticated payload / the plaintext bytevector |
+| ~base16->bytes~           | a hexadecimal string                                 | the decoded bytevector                          |
 | ~base16-encode~ / ~base16-decode~ | a string                                    | hexadecimal text / the decoded string           |
 | ~base64-encode~ / ~base64-decode~ | a string                                    | Base64 text / the decoded string                |
 | ~bytes->base16~ / ~bytes->base64~ | a bytevector                                | the encoded text                                |
 | ~base64->bytes~           | a Base64 string                                      | the decoded bytevector                          |
 | ~random-bytes~            | =#:length= (default 8)                                | strong random bytes from libgcrypt              |
 
-AES-256-CBC and PBKDF2 come from libgcrypt, the C library Guile already links
-through =guile-gcrypt=, which publishes no Scheme bindings for ciphers or key
-derivation; the module binds ~gcry_cipher_*~ and ~gcry_kdf_derive~ itself with
-Guile's FFI. HMAC-SHA256 uses =guile-gcrypt='s ~sign-data~, and the encodings
-are plain Scheme.
+AES-256-CBC, AES-256-GCM, PBKDF2 and Argon2id come from libgcrypt, the C library
+Guile already links through =guile-gcrypt=, which publishes no Scheme bindings
+for ciphers or key derivation; the module binds ~gcry_cipher_*~,
+~gcry_kdf_derive~ and the stateful ~gcry_kdf_open~ / ~gcry_kdf_compute~ /
+~gcry_kdf_final~ trio itself with Guile's FFI. Argon2id needs libgcrypt 1.11 or
+newer, and ~argon2id-available?~ reports whether the loaded library has it.
+HMAC-SHA256 uses =guile-gcrypt='s ~sign-data~, and the encodings are plain
+Scheme.
 
 #+begin_src scheme
 (use-modules (bewaking crypto))
@@ -669,9 +723,12 @@ From Scheme, the same two directions are:
 ;; => "a secret that openssl sealed"
 #+end_src
 
-The reference values used by the test suite were generated with OpenSSL 3.5
-and can be regenerated with ~openssl kdf~ (PBKDF2-HMAC-SHA256),
-~openssl dgst -sha256 -hmac~ (the MAC) and ~openssl enc~ (the AES layer).
+The reference values used by the test suite were generated with OpenSSL 3.5 and
+Python's =cryptography=, and can be regenerated with ~openssl kdf~
+(PBKDF2-HMAC-SHA256), ~openssl dgst -sha256 -hmac~ (the HMAC, which the older
+envelopes still use) and ~openssl enc~ (the AES-CBC layer). The GCM payload
+format is checked byte-for-byte against =cryptography='s ~AESGCM~, under both
+derivations, and the Argon2id derivation against the RFC 9106 test vector.
 
 ----------------
 
@@ -881,7 +938,7 @@ short-lived state the server would otherwise have to store:
 The same pattern covers multi-step forms (seal the half-finished state into a
 hidden field instead of a session record), pagination or search cursors, and
 "remember my filter" preferences. Because the data is both encrypted and
-MAC-protected, clients can neither read it nor change it, while the server stays
+authenticated, clients can neither read it nor change it, while the server stays
 free of per-user state. ~encrypt-object~ takes =#:key-id= and =#:keyring=,
 exactly like tokens.
 
@@ -928,7 +985,7 @@ with *no keys at all*, so the result is safe to log:
 
 #+begin_src scheme
 (envelope-metadata #:sealed token)
-;; => ((version . "BWK2") (key-id . "2026a") (created-at . 1791709670)
+;; => ((version . "BWK3") (key-id . "2026a") (created-at . 1791709670)
 ;;     (expires-at . 1792314470)) ; #f when no #:ttl-seconds was recorded
 
 (envelope-expired? #:sealed token) ; => #f
@@ -1041,11 +1098,13 @@ unpredictable output across runs.
 - *Malformed input is refused early.* A wrong key surfaces as a padding or
   format error before any payload is parsed, instead of being mistaken for
   valid data. Base64 and Base16 input is validated character by character.
-- *Integrity is checked explicitly.* Sealed data carries a version tag and an
-  HMAC-SHA256 that is verified before decryption, so tampering with a token or
-  object is detected and reported rather than silently ignored. The MAC covers
-  the rotation metadata (=key-id=, =created-at=, =expires-at=), so those fields
-  cannot be rewritten without invalidating the seal.
+- *Authenticity is checked explicitly.* Sealed data carries a version tag, and
+  the version decides how it is authenticated. BWK3 derives its authenticity
+  from AES-256-GCM, whose tag covers the rotation metadata (=key-id=,
+  =created-at=, =expires-at=) as associated data; BWK1 and BWK2 use an
+  HMAC-SHA256 verified before decryption. Either way a token or object that was
+  edited is reported rather than silently accepted, and none of the metadata can
+  be rewritten without invalidating the seal.
 - *Rotation policies are enforced, not advisory.* An envelope's =expires-at= is
   checked before decryption (unless =#:enforce-expiry? #f= / =--allow-expired=
   explicitly asks otherwise), =#:max-age-seconds= bounds how old data may be, and
@@ -1098,13 +1157,22 @@ Current coverage includes:
 - the CLI: dispatch and exit codes, token and object round-trips through the
   command line, key-id/keyring rotation, rotation-metadata enforcement and
   =token inspect= audit output, and password commands,
-- the versioned envelope: version tagging, malformed-envelope rejection, MAC
-  integrity checks, tamper and wrong-MAC-key rejection, key rotation by key id,
-  and refusal of older versions and of pre-versioning bare Base16 data,
+- the versioned envelope: version tagging, malformed-envelope rejection, tag and
+  MAC integrity checks, tamper rejection (body, key id, created-at, expiry, and a
+  body moved under another version's header), key rotation by key id, and refusal
+  of unknown versions and of pre-versioning bare Base16 data,
+- read compatibility, against envelopes frozen from the earlier release rather
+  than re-sealed here: a real BWK1 and two real BWK2 envelopes open with their
+  original keys, keep their recorded key id and timestamps, still enforce their
+  expiry and their MAC, and are refused if edited,
 - rotation metadata: =created-at= recording, =ttl-seconds= / =expires-at=,
   keyless =envelope-metadata= auditing, expiry enforcement on open,
-  =max-age-seconds=, authenticated metadata (rewriting the header breaks the
-  MAC), and keyring =not-before= / =not-after= windows.
+  =max-age-seconds=, authenticated metadata (rewriting the header breaks the tag
+  or the MAC), and keyring =not-before= / =not-after= windows,
+- AES-256-GCM and the KDFs behind the authenticated payload format: the payload
+  is reproduced byte for byte against an independent implementation under both
+  PBKDF2 and Argon2id, and a flipped ciphertext byte, a wrong key, altered
+  associated data or an unknown key-derivation id are all refused.
 
 ----------------
 
@@ -1142,15 +1210,12 @@ A[Owner Details] --> B(Create Payload)
 B --> C{Payload Valid?}
 C -- Yes --> D[Encrypt with encryption-key]
 D --> E[Garble String]
-E --> F[Encrypt with signing-key]
-F --> G[Garble String]
-G --> H[Base16 Encode]
-H --> X[Add key id + created-at + expires-at]
-X --> K[Signed header + HMAC-SHA256]
-K --> J[Generated Token: BWK2.kid.created.expires.body.mac]
+E --> X[Build header: key id + created-at + expires-at]
+X --> K[Seal with AES-256-GCM, header as associated data]
+K --> J[Generated Token: BWK3.kid.created.expires.body]
 C -- No --> I(Error)
 D -- Error --> I
-F -- Error --> I
+K -- Error --> I
 
 class I error;
 #+end_src
@@ -1161,15 +1226,16 @@ class I error;
 graph LR
 
 H[Token] --> W[Read header: key id, created-at, expires-at]
-W --> V{Version tag + HMAC valid?}
+W --> V{Version tag known?}
 V -- No --> R(Error)
-V -- Yes --> Y{Envelope expired?
+V -- Yes --> J[Base16 Decode]
+J --> L[Verify tag and decrypt with signing-key]
+L -- No --> R(Error)
+L -- Yes --> Y{Envelope expired?
 policy allows it?}
 Y -- No --> R(Error)
-Y -- Yes --> J[Base16 Decode]
-J --> K[Ungarble String]
-K --> L[Decrypt with signing-key]
-L --> M[Ungarble String]
+Y -- Yes --> K[Ungarble String]
+K --> M[Ungarble String]
 M --> N[Decrypt with encryption-key]
 N --> O{Decryption Successful?}
 O -- Yes --> P{Token Valid & Not Expired?}
@@ -1179,6 +1245,11 @@ O -- No --> R
 
 class R error;
 #+end_src
+
+A BWK1 or BWK2 envelope follows the same shape with two differences: its header
+and body are authenticated by an HMAC-SHA256 instead of a cipher tag, and its
+outer AES-CBC layer is decrypted rather than opened by GCM. Both are read for
+compatibility only; nothing seals them any more.
 
 ---------------------
 

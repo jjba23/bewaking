@@ -18,6 +18,7 @@
 (define-module (veritas unit bewaking-spec)
   #:use-module (veritas veritas)
   #:use-module (bewaking bewaking)
+  #:use-module (bewaking crypto)
   #:use-module (ice-9 string-fun)
   #:use-module (uuid generate))
 
@@ -58,6 +59,33 @@
 
 (define some-valid-signing-key
   "503f5869-0a3c-4460-971f-5a88662de3fc")
+
+;; ====== Frozen envelopes of the earlier format versions ======
+;;
+;; These three strings were sealed by the released code from *before* version 3
+;; existed (commit 4ffd244), with the two keys above and the key id "2026a",
+;; and are kept verbatim here. Read compatibility is therefore tested against
+;; real artifacts instead of against whatever the current sealer happens to
+;; print: rewriting them would only test the sealer.
+;;
+;;   BWK1 carries no timestamps and authenticates with an HMAC over
+;;   "BWK1.<key-id>.<body>"; BWK2 adds the two timestamps to header and MAC.
+
+(define bwk1-envelope
+  "BWK1.2026a.3d3d777446656270514d637a49705634384c6c4e426a7a306f6d31314f6c6749434a464456574d2b7a78334965726c306e69364f65543745716e6d4d774947323348527536564e5844523777372b31586b56476473463255.5127137487dd307f4e0a4d69c06706983944369f0200166d500e0988f466982a")
+
+(define bwk2-envelope
+  "BWK2.2026a.1791715315.1791718915.3d3d774f3141672b664b4e6b77436a364939715936726c6b4e6e4d334c41476d744a37445a5831483663482b4e7a76653174626d556a2f426d4f647779384e773066495476422b4141794265312f31586b56476473463255.acb8a942c0cb195c275de2d89b4c984479437f1f6d62a097650fb395087e8ae1")
+
+(define bwk2-no-expiry-envelope
+  "BWK2.2026a.1791715315.-.3d3d77512f794e4d546b45364f5a624263347749386a4f574a447267354e72574d774c512b2b6f6732445a3647744373696c62756a4a5875724e5544754369664d57443432484a4643316f45383831586b56476473463255.e4fdbe668517e8a1e3f08b1f1c1c03d2b126df8e17c8d3967a17b051b9e455c3")
+
+;; The plaintexts those envelopes carry.
+(define bwk1-plaintext
+  "legacy payload")
+
+(define bwk2-plaintext
+  "a payload")
 
 
 (define generate-token-suite
@@ -331,9 +359,39 @@
                               #:encryption-key some-valid-encryption-key
                               #:signing-key some-valid-signing-key)))))
 
-(define (wrong-mac-key-rejected?)
+(define (wrong-signing-key-rejected?)
   (raises? (lambda ()
              (open-envelope #:sealed (sealed-envelope-example)
+                            #:encryption-key some-valid-encryption-key
+                            #:signing-key "some-other-signing-key"))))
+
+(define (tampered-header-rejected? sealed index value)
+  "Return #t when replacing envelope field @var{index} with @var{value} makes
+   the envelope impossible to open, i.e. when that field is authenticated."
+  (raises? (lambda ()
+             (open-envelope #:sealed (with-envelope-field sealed index value)
+                            #:encryption-key some-valid-encryption-key
+                            #:signing-key some-valid-signing-key))))
+
+(define (with-envelope-field sealed index value)
+  "Return @var{sealed} with dot-separated field @var{index} replaced by
+   @var{value}, as an attacker editing the cleartext header would."
+  (let ((fields (string-split sealed #\.)))
+    (list-set! fields index value)
+    (string-join fields ".")))
+
+(define (envelope-body sealed)
+  "Return the sealed body of @var{sealed}, whichever version it is."
+  (let ((fields (string-split sealed #\.)))
+    (if (string=? (car fields) "BWK1")
+        (list-ref fields 2)
+        (list-ref fields 4))))
+
+(define (wrong-mac-key-rejected?)
+  ;; Version 3 has no MAC key at all; the older envelopes still require the one
+  ;; they were sealed with, which here is derived from the signing key.
+  (raises? (lambda ()
+             (open-envelope #:sealed bwk2-no-expiry-envelope
                             #:encryption-key some-valid-encryption-key
                             #:signing-key some-valid-signing-key
                             #:mac-key "wrong-mac-key"))))
@@ -366,7 +424,7 @@
                                  #:key-id "2026a"))
          (other-keyring '(("2025b" (encryption-key . "enc-2025b")
                                    (signing-key . "sig-2025b")))))
-    (and (and (string-contains sealed "BWK2.2026a.") #t)
+    (and (and (string-contains sealed "BWK3.2026a.") #t)
          (equal? (decrypt-object #:object sealed #:keyring keyring) '((v . new)))
          (not (decrypt-object #:object sealed #:keyring other-keyring))
          (not (decrypt-object #:object sealed #:keyring '())))))
@@ -376,19 +434,25 @@
          (test "seal-envelope and open-envelope"
                (assert-true (sealed-envelope? (sealed-envelope-example))
                             #:name "the result is a versioned envelope")
-               (assert-true (and (string-prefix? "BWK2."
+               (assert-true (and (string-prefix? "BWK3."
                                                  (sealed-envelope-example))
                                  #t)
                             #:name "the envelope starts with the version tag")
-               (assert-equal #:expect "BWK2" #:got seal-format-version
+               (assert-equal #:expect "BWK3" #:got seal-format-version
                              #:name "the module exposes the current format version")
+               (assert-equal #:expect '("BWK3" "BWK2" "BWK1")
+                             #:got readable-seal-format-versions
+                             #:name "the readable versions are listed for operators")
                (assert-equal #:expect "top secret payload"
                              #:got (envelope-round-trip-value)
                              #:name "the plaintext round-trips")
                (assert-true (tampered-envelope-rejected?)
                             #:name "a tampered envelope fails the integrity check")
+               (assert-true (wrong-signing-key-rejected?)
+                            #:name "a wrong signing key fails the cipher check")
                (assert-true (wrong-mac-key-rejected?)
-                            #:name "a wrong MAC key fails the integrity check"))
+                            #:name "a wrong MAC key still fails an older envelope"))
+
          (test "tokens and objects are envelopes and reject tampering"
                (assert-true (sealed-envelope?
                              (generate-token #:encryption-key
@@ -409,13 +473,24 @@
                             #:name "a tampered token is rejected")
                (assert-true (tampered-object-rejected?)
                             #:name "a tampered object is rejected"))
-         (test "data that is not a current-version envelope is refused"
+         (test "data that is not a readable envelope is refused"
                (assert-false (sealed-envelope? "not-an-envelope")
                              #:name "arbitrary text is not an envelope")
-               (assert-false (sealed-envelope? "BWK1.2026a.deadbeef.abc123")
-                             #:name "an older envelope version is not recognised")
-               (assert-false (sealed-envelope? "BWK3.2026a.1.2.deadbeef.abc1")
+               (assert-true (sealed-envelope? bwk1-envelope)
+                             #:name "the version tag of every readable format is recognised")
+               (assert-false (sealed-envelope? "BWK9.2026a.1.2.deadbeef")
                              #:name "an unknown envelope version is not recognised")
+               (assert-true (and (sealed-envelope? "BWK3.2026a.1.2.deadbeef.abc1")
+                                 #t)
+                            #:name "recognition is a version-tag check, not a structure check")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK3.2026a.1.2.deadbeef.abc1"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a BWK3 envelope carrying an extra MAC field is refused")
                (assert-true (raises? (lambda ()
                                        (open-envelope
                                         #:sealed "BWK1.2026a.deadbeef.abc123"
@@ -423,7 +498,15 @@
                                         some-valid-encryption-key
                                         #:signing-key
                                         some-valid-signing-key)))
-                            #:name "opening an older envelope version raises")
+                            #:name "a BWK1 envelope whose MAC does not verify raises")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK9.2026a.1.2.deadbeef"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "an unsupported version raises rather than being guessed at")
                (assert-false (decrypt-token #:encryption-key
                                             some-valid-encryption-key
                                             #:signing-key
@@ -448,9 +531,139 @@
                                                   #:key-id "rotate-1"
                                                   #:get-owner-details
                                                   get-owner-details)
-                                  "BWK2.rotate-1.")
+                                  "BWK3.rotate-1.")
                                  #t)
                             #:name "the token carries the key id"))))
+
+;; ====== Reading the earlier envelope versions ======
+;;
+;; Version 3 is the only one produced now, but data sealed by BWK1 and BWK2 has
+;; to keep opening, so these tests open the frozen artifacts defined at the top
+;; of the file rather than anything sealed in this run.
+
+(define (opens-to? sealed plaintext)
+  (string=? plaintext
+            (open-envelope #:sealed sealed
+                           #:encryption-key some-valid-encryption-key
+                           #:signing-key some-valid-signing-key)))
+
+(define (opens-at? sealed plaintext now)
+  (string=? plaintext
+            (open-envelope #:sealed sealed
+                           #:encryption-key some-valid-encryption-key
+                           #:signing-key some-valid-signing-key
+                           #:now now)))
+
+(define (bwk2-resealed-with-mac-key mac-key)
+  "The BWK2 fixture with its MAC recomputed under @var{mac-key}.
+
+   An installation that provisioned an explicit MAC key sealed its data exactly
+   this way; the body is untouched, only the MAC differs, so reading it proves
+   that an opening call passes =#:mac-key= through to the verification. The
+   header of that fixture is BWK2.2026a.1791715315.-, and a BWK2 MAC is over the
+   header and body, so the message is rebuilt here without the MAC."
+  (let ((message (string-append "BWK2.2026a.1791715315.-"
+                                "."
+                                (envelope-body bwk2-no-expiry-envelope))))
+    (string-append message "." (hmac-sha256-hex mac-key message))))
+
+(define (old-envelope-metadata-field sealed field)
+  (assoc-ref (envelope-metadata #:sealed sealed) field))
+
+(define older-envelope-suite
+  (suite "Reading earlier envelope versions (BWK1 and BWK2)"
+         (test "a BWK1 envelope still opens"
+               (assert-true (opens-to? bwk1-envelope bwk1-plaintext)
+                            #:name "its plaintext comes back")
+               (assert-equal #:expect "BWK1"
+                             #:got (old-envelope-metadata-field bwk1-envelope
+                                                                  'version)
+                             #:name "its metadata reports version BWK1")
+               (assert-equal #:expect "2026a"
+                             #:got (old-envelope-metadata-field bwk1-envelope
+                                                                  'key-id)
+                             #:name "its key id is reported, so rotation still works")
+               (assert-false (old-envelope-metadata-field bwk1-envelope
+                                                            'created-at)
+                             #:name "BWK1 carried no created-at")
+               (assert-false (old-envelope-metadata-field bwk1-envelope
+                                                            'expires-at)
+                             #:name "BWK1 carried no expiry"))
+         (test "a BWK2 envelope still opens, expiry and all"
+               (assert-true (opens-to? bwk2-no-expiry-envelope bwk2-plaintext)
+                            #:name "an envelope with no expiry opens")
+               (assert-true (opens-at? bwk2-envelope bwk2-plaintext 1791716000)
+                            #:name "an unexpired envelope opens")
+               (assert-equal #:expect 1791715315
+                             #:got (old-envelope-metadata-field bwk2-envelope
+                                                                  'created-at)
+                             #:name "its created-at is reported")
+               (assert-equal #:expect 1791718915
+                             #:got (old-envelope-metadata-field bwk2-envelope
+                                                                  'expires-at)
+                             #:name "its expiry is reported")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed bwk2-envelope
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key
+                                        #:now 1791719000)))
+                            #:name "past its expiry it is refused"))
+         (test "the MAC of an older envelope is still enforced"
+               (assert-true (tampered-header-rejected? bwk2-envelope 2 "1000")
+                            #:name "editing created-at is caught by the MAC")
+               (assert-true (tampered-header-rejected? bwk2-envelope 4 "00")
+                            #:name "editing the body is caught by the MAC")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed bwk1-envelope
+                                        #:encryption-key
+                                        "some-other-encryption-key"
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "the wrong encryption key is refused"))
+         (test "an older envelope sealed with an explicit MAC key still needs it"
+               (assert-equal #:expect bwk2-plaintext
+                             #:got (open-envelope
+                                    #:sealed (bwk2-resealed-with-mac-key
+                                              "a-provisioned-mac-key")
+                                    #:encryption-key some-valid-encryption-key
+                                    #:signing-key some-valid-signing-key
+                                    #:mac-key "a-provisioned-mac-key")
+                             #:name "the provisioned MAC key opens it")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (bwk2-resealed-with-mac-key
+                                                  "a-provisioned-mac-key")
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "without it, the derived MAC key does not verify"))
+         (test "an older body cannot pass as a newer envelope"
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (string-append
+                                                  "BWK3.default.1791715315.-."
+                                                  (envelope-body bwk2-envelope))
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a BWK2 body under a BWK3 header is refused")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (string-append
+                                                  "BWK2.default.1791715315.-."
+                                                  (envelope-body bwk1-envelope)
+                                                  ".00")
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a BWK1 body under a BWK2 header is refused"))))
 
 ;; ====== Envelope metadata (rotation policy and audit) ======
 
@@ -524,9 +737,15 @@
                (assert-false (metadata-field (sealed-envelope-example)
                                              'expires-at)
                              #:name "there is no expiry unless one was requested")
-               (assert-false (envelope-metadata #:sealed
-                                                "BWK1.2026a.deadbeef.abc123")
-                             #:name "metadata is only read from current-version envelopes"))
+               (assert-equal #:expect "BWK3"
+                             #:got (metadata-field (sealed-envelope-example)
+                                                   'version)
+                             #:name "the format version is reported")
+               (assert-false (envelope-metadata #:sealed "not-an-envelope")
+                             #:name "metadata is only read from envelopes")
+               (assert-equal #:expect "BWK1"
+                             #:got (metadata-field bwk1-envelope 'version)
+                             #:name "an older envelope's version is reported too"))
          (test "ttl-seconds records an absolute expiry"
                (assert-equal #:expect 1000
                              #:got (metadata-field (sealed-with-metadata)
@@ -564,9 +783,26 @@
                                         #:signing-key some-valid-signing-key
                                         #:now 2000 #:max-age-seconds 100)))
                             #:name "max-age-seconds enforces a rotation policy"))
-         (test "the metadata is covered by the MAC"
+         (test "the metadata is authenticated"
+               ;; Version 3 has no MAC field: the header is bound to the body as
+               ;; the cipher's associated data, so editing any part of it must
+               ;; break the tag rather than change what the envelope means.
                (assert-true (tampered-created-at-rejected?)
-                            #:name "editing created-at breaks the integrity check"))
+                            #:name "editing created-at in a BWK3 envelope breaks its tag")
+               (assert-true (tampered-header-rejected? (sealed-with-metadata) 1
+                                                       "another-key-id")
+                            #:name "editing the key id breaks the tag")
+               (assert-true (tampered-header-rejected? (sealed-with-metadata) 3
+                                                       "9999999999")
+                            #:name "extending the expiry in the envelope breaks the tag")
+               (assert-true (tampered-header-rejected? (sealed-with-metadata) 3
+                                                       "-")
+                            #:name "removing the expiry marker breaks the tag")
+               (assert-true (tampered-header-rejected? (sealed-envelope-example) 0
+                                                       "BWK2")
+                            #:name "relabelling the version is refused")
+               (assert-true (tampered-header-rejected? bwk2-envelope 2 "1000")
+                            #:name "editing created-at in a BWK2 envelope breaks its MAC"))
          (test "expired tokens and objects are refused"
                (assert-true (expired-token-rejected?)
                             #:name "a token sealed with a past expiry is refused")
@@ -579,7 +815,23 @@
                             #:name "a key past not-after cannot open data")
                (assert-true (future-key-rejected?)
                             #:name "a key before not-before cannot seal data"))
-         (test "a malformed current-version envelope is rejected"
+         (test "a malformed envelope is rejected"
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK3.2026a.1000.-"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a missing body is refused")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK3.2026a.not-a-number.-.body"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a non-numeric created-at is refused")
                (assert-true (raises? (lambda ()
                                        (open-envelope
                                         #:sealed "BWK2.2026a.1000.-.body"
@@ -587,15 +839,15 @@
                                         some-valid-encryption-key
                                         #:signing-key
                                         some-valid-signing-key)))
-                            #:name "a missing MAC field is refused")
+                            #:name "a BWK2 envelope missing its MAC field is refused")
                (assert-true (raises? (lambda ()
                                        (open-envelope
-                                        #:sealed "BWK2.2026a.not-a-number.-.body.mac"
+                                        #:sealed "BWK1.2026a.body"
                                         #:encryption-key
                                         some-valid-encryption-key
                                         #:signing-key
                                         some-valid-signing-key)))
-                            #:name "a non-numeric created-at is refused"))
+                            #:name "a BWK1 envelope missing its MAC field is refused"))
          (test "invalid sealing options are rejected"
                (assert-true (raises? (lambda ()
                                        (seal-envelope
@@ -624,5 +876,5 @@
                garble-ungarble-string-suite has-needed-permissions-suite
                is-token-expired-suite token-helpers-suite
                generic-object-suite sealed-envelope-suite
-               envelope-metadata-suite))
+               older-envelope-suite envelope-metadata-suite))
 

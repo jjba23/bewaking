@@ -58,6 +58,17 @@ Rotation metadata (recorded in the sealed header and covered by the MAC):
   --max-age-seconds N           refuse data sealed longer ago than N seconds
   --allow-expired               open expired data anyway (audit/recovery only)
 
+Key derivation (sealing only; opening reads it back from the data itself):
+  --kdf NAME                    pbkdf2 (default) or argon2id
+  --kdf-memory-kib N            Argon2id memory cost in KiB (default 65536)
+  --kdf-iterations N            Argon2id passes (default 3)
+  --kdf-parallelism N           Argon2id lanes (default 1)
+  Argon2id requires libgcrypt 1.11 or newer. The cost is per AES layer and a
+  token has two, so sealing and opening each derive twice: 64 MiB with 3
+  passes is around 90 ms per derivation, 8 MiB with 1 pass around 3 ms.
+  PBKDF2 takes no parameters, because the OpenSSL-compatible format it
+  produces has nowhere to record them.
+
 A keyring file has the shape (not-before/not-after are optional rotation
 windows; using a key outside its window is refused):
   ((\"2026a\" (encryption-key . \"e1\") (signing-key . \"s1\"))
@@ -99,6 +110,8 @@ Examples:
       --encryption-key \"$K1\" --signing-key \"$K2\"
   echo '((name . Joe) (score . 7))' | bewaking object encrypt \\
       --encryption-key \"$K1\" --signing-key \"$K2\"
+  bewaking token generate --owner-id 42 --kdf argon2id \\
+      --kdf-memory-kib 8192 --encryption-key \"$K1\" --signing-key \"$K2\"
   bewaking password generate --length 32
 ")
 
@@ -241,6 +254,38 @@ Examples:
                 (parse-integer-option max-age "--max-age-seconds")
                 #f))))
 
+(define (kdf-option options)
+  "Return the key-derivation specification selected by the --kdf options.
+
+   --kdf names the function and the three parameter options are optional
+   overrides. Without --kdf the library default is used, and the parameter
+   options are then refused rather than silently ignored. The library itself
+   validates names and ranges, so a typo is reported with its own message."
+  (let ((name (opt options "kdf"))
+        (memory (opt options "kdf-memory-kib"))
+        (iterations (opt options "kdf-iterations"))
+        (parallelism (opt options "kdf-parallelism")))
+    (cond
+     ((not name)
+      (when (or memory iterations parallelism)
+        (cli-error
+         "--kdf-memory-kib, --kdf-iterations and --kdf-parallelism require --kdf argon2id"))
+      default-kdf)
+     (else
+      (append (list (cons 'kdf (string->symbol name)))
+              (if memory
+                  (list (cons 'memory-kib
+                              (parse-integer-option memory "--kdf-memory-kib")))
+                  '())
+              (if iterations
+                  (list (cons 'iterations
+                              (parse-integer-option iterations "--kdf-iterations")))
+                  '())
+              (if parallelism
+                  (list (cons 'parallelism
+                              (parse-integer-option parallelism "--kdf-parallelism")))
+                  '()))))))
+
 (define (parse-permissions value)
   "Split a comma-separated permission string into a list of symbols."
   (if (or (not value) (string-null? value))
@@ -331,8 +376,9 @@ Examples:
                                                    #:token-validity-seconds
                                                    validity
                                                    #:ttl-seconds ttl-seconds
-                                                   #:expires-at
-                                                   expires-at))))))
+                                                   #:expires-at expires-at
+                                                   #:kdf (kdf-option
+                                                          options)))))))
         (unless (and validity (> validity 0))
           (cli-error "--validity-seconds must be a positive integer"))
         (if token
@@ -417,7 +463,9 @@ Examples:
                                                #:keyring keyring
                                                #:key-id key-id
                                                #:ttl-seconds ttl-seconds
-                                               #:expires-at expires-at)))))
+                                               #:expires-at expires-at
+                                               #:kdf (kdf-option
+                                                      options))))))
         (if sealed
             (begin (display sealed) (newline))
             (cli-error "failed to encrypt object ~a"
