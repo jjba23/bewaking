@@ -59,8 +59,6 @@
 (define some-valid-signing-key
   "503f5869-0a3c-4460-971f-5a88662de3fc")
 
-(define some-valid-token
-  "3d4d714938487a384a56717573394169516774775471304b74334e366a665562763051364e733244735461475a6c466d3366384c32666f684e5a79344578494376374a6f7376487169697841677168494e3256414d2b6e7770564359554d36747567633164667250574968714a582f6d544471514a684a346254644f574b32636366795675305a6138503769574d454e395a42524a6342577a56494d6f47445366746548397579444e6e7376615a56784c386f412f326f794d797850627962626667777a39432f344b47384f6f35734c50544470527054665959666562726b78546a654848614d684d6e393462444959593145727156626c67654b47796773525a6e586764466746347845656a667a7869476746712f56587173663063752b677266394f703132695a42734b4c696e7845714a52622f6a6b593636505062316b31644c72714f656474312f4a7a417057704b34566c506361385758517039444471333669307a3035373642794c726c72443875586c6264742f3934654e3361566c56647551586350373371643759414848473830637856644279414f734b39574f79774c417068484a51656a57636935566a794d573975584d385664756133672b395a765864465849713566777636577a596b332f6c495072746770414f415235317579497167486d7470782b533454377054666d5936462f6c42334e4b694163303853357352664f4e7878336a56364d375963676c3464496e634368766774385667586a426f33346745526d56595147796838496470356265586f393063684b705676646a3936385662526245572b6e3458442b436869544774354c506975425432526f75317665493850687234483834304d505a6965334c54345541654c6a54416e492b776f705a716b7342676252443532415a33784e70735278753174344a5642627336666c4c7561505a554c565248664943667a59444656465064544562496e74436a78764452585a6e5555574650484e4551576c77784b3069434c517a6f78345947452b4a7a43775035534c696445352b55436c525136384a6970495279745753643865576b576f734b6431534e7377336d344231506c6a6446374354476b6242617449532f516f535435642b6642493250446232486b6c67446d704630737536716b715033436f63615852504e77356d56565755794576504949782b53386736684b6455304f50454250324865634b2f496e436a4441434f5155356e573352614d694251504a61345a5a2f374a6473796b51747830774d78473267764770766a69384e7652304469703435453848315a6d7251446376704b443230424e6d6844534e6c3377566366366870524d4e714a624d55646a674e4d4a6d6f72525437565355576f39326555554161326c6868783375514b3937697239336a2f376c304e732f5a426a4f78304f372b755177346f7568687071576e4a3676725749744d4c4a4c4e6233554e33536866672f5953454942744f583848675245757a4d56516b565a4e715659343841646c5a44716c7149734a7733527761466f4d7159335456306e6f4751464736366f506370415a74586439757168623237514a7246634d35634c45764e484759325058317551376238687950586f44634d426a3831586b56476473463255")
 
 (define generate-token-suite
   (suite "generate-token"
@@ -77,13 +75,18 @@
                                    (not (equal? "" t))
                                    (not (equal? '() t))))))))
 
+(define (a-fresh-token)
+  (generate-token #:encryption-key some-valid-encryption-key
+                  #:signing-key some-valid-signing-key
+                  #:get-owner-details get-owner-details))
+
 (define decode-token-suite
   (suite "Decryption"
          (test "decrypt-token"
                (assert-false (decrypt-token #:encryption-key
                                             some-valid-encryption-key
                                             #:signing-key "some-signing-key"
-                                            #:token some-valid-token)
+                                            #:token (a-fresh-token))
                              #:name
                              "fails gracefully when signing key is not valid")
                (assert-false (decrypt-token #:encryption-key
@@ -92,19 +95,15 @@
                                             some-valid-signing-key
                                             #:token "some-token")
                              #:name "fails gracefully when token is not valid")
-               (assert-true (let* ((d (decrypt-token #:encryption-key
-                                       some-valid-encryption-key
-                                       #:signing-key some-valid-signing-key
-                                       #:token some-valid-token)))
-                              (display (format #f "\ndecoded token: ~s\n" d))
-                              (and (not (equal? #f d))
-                                   (not (equal? "" d))
-                                   (not (equal? '() d))
-                                   (equal? (assoc-ref d
-                                                      'owner-name)
+               (assert-true (let ((d (decrypt-token #:encryption-key
+                                                    some-valid-encryption-key
+                                                    #:signing-key
+                                                    some-valid-signing-key
+                                                    #:token (a-fresh-token))))
+                              (and d
+                                   (equal? (assoc-ref d 'owner-name)
                                            "Legolas son of Thandruil")
-                                   (equal? (assoc-ref d
-                                                      'owner-email)
+                                   (equal? (assoc-ref d 'owner-email)
                                            "someone@jointhefreeworld.org")))
                             #:name "works properly with valid token"))))
 
@@ -383,8 +382,6 @@
                             #:name "the envelope starts with the version tag")
                (assert-equal #:expect "BWK2" #:got seal-format-version
                              #:name "the module exposes the current format version")
-               (assert-equal #:expect "BWK1" #:got legacy-seal-format-version
-                             #:name "the module exposes the legacy format version")
                (assert-equal #:expect "top secret payload"
                              #:got (envelope-round-trip-value)
                              #:name "the plaintext round-trips")
@@ -412,16 +409,33 @@
                             #:name "a tampered token is rejected")
                (assert-true (tampered-object-rejected?)
                             #:name "a tampered object is rejected"))
-         (test "legacy tokens remain readable"
-               (assert-false (sealed-envelope? some-valid-token)
-                             #:name "the legacy fixture is not an envelope")
-               (assert-true (and (decrypt-token #:encryption-key
-                                                some-valid-encryption-key
-                                                #:signing-key
-                                                some-valid-signing-key
-                                                #:token some-valid-token)
-                                 #t)
-                            #:name "the legacy fixture still decrypts"))
+         (test "data that is not a current-version envelope is refused"
+               (assert-false (sealed-envelope? "not-an-envelope")
+                             #:name "arbitrary text is not an envelope")
+               (assert-false (sealed-envelope? "BWK1.2026a.deadbeef.abc123")
+                             #:name "an older envelope version is not recognised")
+               (assert-false (sealed-envelope? "BWK3.2026a.1.2.deadbeef.abc1")
+                             #:name "an unknown envelope version is not recognised")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK1.2026a.deadbeef.abc123"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "opening an older envelope version raises")
+               (assert-false (decrypt-token #:encryption-key
+                                            some-valid-encryption-key
+                                            #:signing-key
+                                            some-valid-signing-key
+                                            #:token "3d4d714938487a384a56717573394169")
+                             #:name "a pre-versioning bare Base16 token is refused")
+               (assert-false (decrypt-object #:object "3d4d714938487a384a56717573394169"
+                                             #:encryption-key
+                                             some-valid-encryption-key
+                                             #:signing-key
+                                             some-valid-signing-key)
+                             #:name "a bare Base16 object is refused"))
          (test "key rotation with a keyring"
                (assert-true (keyring-rotation-works?)
                             #:name "a keyring seals and opens by key id"))
@@ -497,12 +511,6 @@
                                          (signing-key . "sig-2026a")
                                          (not-before . 9999999999))))))))
 
-(define (bwk1-envelope)
-  (seal-envelope #:plaintext "legacy payload"
-                 #:encryption-key some-valid-encryption-key
-                 #:signing-key some-valid-signing-key
-                 #:version "BWK1" #:key-id "2026a"))
-
 (define envelope-metadata-suite
   (suite "Envelope metadata (key id, created-at, expiry)"
          (test "metadata is reported without any key"
@@ -516,8 +524,9 @@
                (assert-false (metadata-field (sealed-envelope-example)
                                              'expires-at)
                              #:name "there is no expiry unless one was requested")
-               (assert-false (envelope-metadata #:sealed some-valid-token)
-                             #:name "a legacy token has no envelope metadata"))
+               (assert-false (envelope-metadata #:sealed
+                                                "BWK1.2026a.deadbeef.abc123")
+                             #:name "metadata is only read from current-version envelopes"))
          (test "ttl-seconds records an absolute expiry"
                (assert-equal #:expect 1000
                              #:got (metadata-field (sealed-with-metadata)
@@ -570,23 +579,23 @@
                             #:name "a key past not-after cannot open data")
                (assert-true (future-key-rejected?)
                             #:name "a key before not-before cannot seal data"))
-         (test "BWK1 envelopes remain readable"
-               (assert-true (and (string-contains (bwk1-envelope) "BWK1.2026a.")
-                                 #t)
-                            #:name "a BWK1 envelope can still be produced")
-               (assert-equal #:expect "BWK1"
-                             #:got (metadata-field (bwk1-envelope) 'version)
-                             #:name "its metadata reports version BWK1")
-               (assert-false (metadata-field (bwk1-envelope) 'created-at)
-                             #:name "BWK1 carries no created-at")
-               (assert-equal #:expect "legacy payload"
-                             #:got (open-envelope
-                                    #:sealed (bwk1-envelope)
-                                    #:encryption-key some-valid-encryption-key
-                                    #:signing-key some-valid-signing-key)
-                             #:name "a BWK1 envelope still opens")
-               (assert-true (sealed-envelope? (bwk1-envelope))
-                            #:name "BWK1 is recognised as an envelope"))
+         (test "a malformed current-version envelope is rejected"
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK2.2026a.1000.-.body"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a missing MAC field is refused")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed "BWK2.2026a.not-a-number.-.body.mac"
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a non-numeric created-at is refused"))
          (test "invalid sealing options are rejected"
                (assert-true (raises? (lambda ()
                                        (seal-envelope
@@ -607,15 +616,8 @@
                                         #:plaintext "x"
                                         #:encryption-key some-valid-encryption-key
                                         #:signing-key some-valid-signing-key
-                                        #:version "BWK9")))
-                            #:name "an unsupported version is rejected")
-               (assert-true (raises? (lambda ()
-                                       (seal-envelope
-                                        #:plaintext "x"
-                                        #:encryption-key some-valid-encryption-key
-                                        #:signing-key some-valid-signing-key
-                                        #:version "BWK1" #:ttl-seconds 60)))
-                            #:name "BWK1 refuses to silently drop an expiry"))))
+                                        #:key-id "has.a.dot")))
+                            #:name "a key id containing a dot is rejected"))))
 
 (define (spec)
   (veritas-run generate-token-suite decode-token-suite lossless-token-suite

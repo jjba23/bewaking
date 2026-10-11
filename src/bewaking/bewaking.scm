@@ -18,11 +18,12 @@
 (define-module (bewaking bewaking)
   #:use-module (uuid generate)
   #:use-module (ice-9 format)
-  #:use-module (ice-9 popen)
-  #:use-module (ice-9 textual-ports)
-  #:use-module (ice-9 string-fun)
   #:use-module (srfi srfi-1)
   #:use-module (srfi srfi-11)
+  #:use-module (bewaking crypto)
+  ;; Base16 encoding and decoding are implemented in (bewaking crypto) and
+  ;; re-exported here so that bewaking's public API is unchanged.
+  #:re-export (base16-encode base16-decode)
   #:export (generate-token decrypt-token
                            unsafe-generate-token
                            string-garble
@@ -40,56 +41,12 @@
                            envelope-metadata
                            envelope-expired?
                            seal-format-version
-                           legacy-seal-format-version
                            default-key-id
-                           base16-encode
-                           base16-decode
                            is-token-expired?
                            token-remaining-seconds
                            token-valid?
                            has-needed-permissions?
                            token-payload-valid?))
-
-(define (syscall cmd)
-  "Executes a shell command and captures its standard output.
-
-   #:args
-     cmd: A string representing the shell command to execute.
-
-   #:returns
-     A string containing the entire standard output of the executed command.
-
-   #:example
-     (syscall \"ls -l\") ; Returns a string with the directory listing"
-  (let* ((process (open-input-pipe cmd))
-         (process-output (get-string-all process)))
-    (close-pipe process) process-output))
-
-(define (string-contains-nul? s)
-  "Return #t when @var{s} contains a NUL character (U+0000)."
-  (let loop ((i 0))
-    (cond ((= i (string-length s)) #f)
-          ((char=? (string-ref s i) #\nul) #t)
-          (else (loop (+ i 1))))))
-
-(define (shell-quote s)
-  "Safely quote @var{s} so it can be interpolated into a POSIX shell command
-   without being interpreted by the shell. Embedded single quotes are escaped
-   with the canonical '\"'\\''\" sequence. This prevents shell-injection when
-   user-supplied payloads or keys are passed to external tools such as
-   @code{openssl}, @code{xxd} or @code{base64}."
-  (string-append "'" (string-replace-substring s "'" "'\\''") "'"))
-
-(define (shell-value s)
-  "Return @var{s} safely quoted for the shell, refusing values that contain a
-   NUL byte. Argument vectors (argv) cannot carry NUL bytes, so attempting to
-   pass one to the shell silently truncates the command. Valid bewaking data is
-   always text, so a NUL signals a decryption failure and we raise instead of
-   producing a malformed shell command."
-  (when (string-contains-nul? s)
-    (error
-     "bewaking: refusing to pass binary data containing NUL bytes to the shell."))
-  (shell-quote s))
 
 (define (string-garble s)
   "Garbles a string by splitting it into two halves, reversing each half,
@@ -172,75 +129,50 @@ on every field, and returning either #t or #f representing validity status."
   "Safely read a Scheme datum back from a string produced by `serialize-payload`.
    Reading data (as opposed to evaluating it) is intentional: unlike `eval-string`,
    `read` cannot execute arbitrary code. Guile disables the `#.` read-eval syntax
-   by default, so untrusted decrypted content is treated strictly as data.
-
-   For backward compatibility, a top-level `(quasiquote <datum>)` wrapper is
-   unwrapped. Tokens produced by older bewaking versions serialized their payload
-   as the quasiquote form and relied on `eval-string` to unwrap it. Unwrapping is
-   a pure structural operation and never evaluates the datum."
-  (let ((datum (with-input-from-string payload-string read)))
-    (if (and (pair? datum)
-             (eq? (car datum) 'quasiquote)
-             (pair? (cdr datum))
-             (null? (cddr datum)))
-        (cadr datum)
-        datum)))
-
-(define (base64-encode payload)
-  "Base64-encode @var{payload} using the external `base64' tool. `--wrap=0'
-   keeps the output on a single line so it round-trips losslessly."
-  (syscall (format #f "printf %s ~a | base64 --wrap=0"
-                   (shell-value payload))))
-
-(define (base64-decode payload)
-  "Base64-decode @var{payload} using the external `base64' tool."
-  (syscall (format #f "printf %s ~a | base64 --decode"
-                   (shell-value payload))))
+   by default, so untrusted decrypted content is treated strictly as data."
+  (with-input-from-string payload-string read))
 
 (define (encrypt-payload payload k)
-  "Encrypts a given payload using AES256 encryption with a specified key.
-  It leverages the `openssl` command-line tool.
+  "Encrypt @var{payload} with AES-256-CBC under the passphrase @var{k}.
 
-   Args:
+   The output uses exactly the layout of
+   @code{openssl enc -aes256 -pbkdf2 -a -A -k KEY}, so data produced by either
+   implementation can be read by the other:
+
+   - an 8-byte random salt, stored in an OpenSSL @code{Salted__} header;
+   - a 32-byte key and a 16-byte IV derived from the passphrase and that salt
+     with PBKDF2-HMAC-SHA256 over 10000 iterations;
+   - AES-256-CBC with PKCS#7 padding, Base64-encoded on a single line.
+
+   The work happens inside this process; nothing is passed to a shell.
+
+   #:args
      payload: The string to encrypt.
      k: The encryption key (a string) to use.
 
-   Returns:
-     A string representing the base64-encoded, AES256-encrypted version of the payload.
+   #:returns
+     A Base64 string such as \"U2FsdGVkX1+...\".
 
-   Example:
-     (encrypt-payload \"mysecretdata\" \"mysecretkey\")
-      Returns a string like \"U2FsdGVkX1+...\" "
-  (syscall (format #f
-                   "printf %s ~a | openssl enc -aes256 -pbkdf2 -a -A -k ~a"
-                   (shell-value payload) (shell-value k))))
+   #:example
+     (encrypt-payload \"mysecretdata\" \"mysecretkey\")"
+  (openssl-encrypt payload k))
 
 (define (decrypt-payload payload k)
-  "Decrypts an AES256-encrypted payload using a given key.
-   It relies on the `openssl` command-line tool to perform the decryption.
+  "Decrypt a payload previously produced by `encrypt-payload`, by
+   @code{openssl enc -aes256 -pbkdf2 -a -A}, or by any other implementation of
+   that format. Raises an error when the input is not in that format or when
+   its padding is invalid, which is how a wrong key is reported.
 
-   Args:
-     payload: The base64-encoded, AES256-encrypted string to decrypt.
+   #:args
+     payload: The Base64-encoded, AES256-encrypted string to decrypt.
      k: The decryption key (a string) that was used to encrypt the payload.
 
-   Returns:
+   #:returns
      The original, decrypted data as a string.
 
-   Example:
-     (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")
-     Returns \"mysecretdata\" "
-  (syscall (format #f "printf %s ~a | openssl aes-256-cbc -d -pbkdf2 -a -A -base64 -k ~a"
-                   (shell-value payload) (shell-value k))))
-
-(define (base16-encode payload)
-  "Encode @var{payload} as a hexadecimal string using `xxd -plain`."
-  (syscall (format #f "printf %s ~a | xxd -plain | tr -d '\\n'"
-                   (shell-value payload))))
-
-(define (base16-decode payload)
-  "Decode a hexadecimal string back to its raw content using `xxd -plain -revert`."
-  (syscall (format #f "printf %s ~a | xxd -plain -revert"
-                   (shell-value payload))))
+   #:example
+     (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")"
+  (openssl-decrypt payload k))
 
 (define (seal-string plaintext encryption-key signing-key)
   "Apply bewaking's layered sealing pipeline to a plaintext string.
@@ -288,21 +220,15 @@ on every field, and returning either #t or #f representing validity status."
 ;;
 ;; The metadata is authenticated by the MAC, so it can be trusted once verified
 ;; and can be inspected *without* any key for auditing (`envelope-metadata`,
-;; `envelope-expired?`). The version tag lets the format evolve: version 1
-;; (BWK1.<key-id>.<body>.<mac>) carried no metadata and is still accepted, as
-;; are legacy bare Base16 tokens.
+;; `envelope-expired?`). The version tag lets the format evolve, and only the
+;; current version is understood: an older envelope, a pre-versioning bare Base16
+;; token, or arbitrary text is refused.
 
 (define seal-format-version
   "BWK2")
 
-(define legacy-seal-format-version
-  "BWK1")
-
 (define no-expiry-marker
   "-")
-
-(define supported-seal-versions
-  (list seal-format-version legacy-seal-format-version))
 
 (define default-key-id
   "default")
@@ -331,11 +257,9 @@ on every field, and returning either #t or #f representing validity status."
 
 (define (compute-mac message mac-key)
   "Compute HMAC-SHA256 of @var{message}, keyed by @var{mac-key}, and return it as
-   a lowercase hexadecimal string."
-  (string-trim-right
-   (syscall (format #f
-                    "printf %s ~a | openssl dgst -sha256 -hmac ~a | sed 's/^.*= //'"
-                    (shell-value message) (shell-value mac-key)))))
+   a lowercase hexadecimal string. The MAC is computed in this process with
+   libgcrypt; no external program is run."
+  (hmac-sha256-hex mac-key message))
 
 (define (constant-time-string=? a b)
   "Compare two strings for equality without an early exit, to avoid leaking the
@@ -353,50 +277,41 @@ on every field, and returning either #t or #f representing validity status."
 
 (define (sealed-envelope? sealed)
   "Return #t when @var{sealed} is a versioned, authenticated bewaking envelope
-   of any supported version."
+   of the current format version."
   (and (string? sealed)
        (let ((dot (index-of-char sealed #\.)))
          (and dot
-              (member (substring sealed 0 dot) supported-seal-versions)
-              #t))))
+              (string=? (substring sealed 0 dot) seal-format-version)))))
 
 (define (parse-envelope sealed)
   "Parse an envelope into an alist with @code{version}, @code{key-id},
    @code{created-at}, @code{expires-at}, @code{body} and @code{mac}. Raises an
-   error when the version is unsupported or the structure malformed."
-  (let* ((parts (string-split sealed #\.))
-         (version (car parts)))
-    (cond ((equal? version legacy-seal-format-version)
-           (unless (= (length parts) 4)
-             (error "bewaking: malformed BWK1 envelope"))
-           (list (cons 'version version)
-                 (cons 'key-id (list-ref parts 1))
-                 (cons 'created-at #f)
-                 (cons 'expires-at #f)
-                 (cons 'body (list-ref parts 2))
-                 (cons 'mac (list-ref parts 3))))
-          ((equal? version seal-format-version)
-           (unless (= (length parts) 6)
-             (error "bewaking: malformed BWK2 envelope"))
-           (let ((created-at (string->number (list-ref parts 2)))
-                 (expires-raw (list-ref parts 3)))
-             (unless (integer? created-at)
-               (error "bewaking: malformed BWK2 envelope (created-at)"))
-             (list (cons 'version version)
-                   (cons 'key-id (list-ref parts 1))
-                   (cons 'created-at created-at)
-                   (cons 'expires-at
-                         (if (string=? expires-raw no-expiry-marker)
-                             #f
-                             (let ((expires (string->number expires-raw)))
-                               (unless (integer? expires)
-                                 (error
-                                  "bewaking: malformed BWK2 envelope (expires-at)"))
-                               expires)))
-                   (cons 'body (list-ref parts 4))
-                   (cons 'mac (list-ref parts 5)))))
-          (else
-           (error (format #f "bewaking: unsupported seal version '~a'" version))))))
+   error when the structure is malformed."
+  (let ((parts (string-split sealed #\.)))
+    (unless (= (length parts) 6)
+      (error
+       (format #f "bewaking: malformed ~a envelope" seal-format-version)))
+    (let ((created-at (string->number (list-ref parts 2)))
+          (expires-raw (list-ref parts 3)))
+      (unless (integer? created-at)
+        (error
+         (format #f "bewaking: malformed ~a envelope (created-at)"
+                 seal-format-version)))
+      (list (cons 'version seal-format-version)
+            (cons 'key-id (list-ref parts 1))
+            (cons 'created-at created-at)
+            (cons 'expires-at
+                  (if (string=? expires-raw no-expiry-marker)
+                      #f
+                      (let ((expires (string->number expires-raw)))
+                        (unless (integer? expires)
+                          (error
+                           (format #f
+                                   "bewaking: malformed ~a envelope (expires-at)"
+                                   seal-format-version)))
+                        expires)))
+            (cons 'body (list-ref parts 4))
+            (cons 'mac (list-ref parts 5))))))
 
 (define (envelope-mac-message info)
   "Build the exact string authenticated by the MAC, from a parsed envelope alist
@@ -406,18 +321,16 @@ on every field, and returning either #t or #f representing validity status."
         (created-at (assoc-ref info 'created-at))
         (expires-at (assoc-ref info 'expires-at))
         (body (assoc-ref info 'body)))
-    (if (equal? version legacy-seal-format-version)
-        (format #f "~a.~a.~a" version key-id body)
-        (format #f "~a.~a.~a.~a.~a" version key-id created-at
-                (or expires-at no-expiry-marker) body))))
+    (format #f "~a.~a.~a.~a.~a" version key-id created-at
+            (or expires-at no-expiry-marker) body)))
 
 (define* (envelope-metadata #:key sealed)
   "Return an alist of envelope metadata without needing any key:
    @code{version}, @code{key-id}, @code{created-at} and @code{expires-at}.
 
-   @code{expires-at} is #f when the data never expires; both timestamps are #f
-   for BWK1 envelopes. Returns #f when @var{sealed} is not an envelope. The
-   metadata is covered by the MAC, so it can be audited safely."
+   @code{expires-at} is #f when the data never expires. Returns #f when
+   @var{sealed} is not a current-version envelope. The metadata is covered by
+   the MAC, so it can be audited safely."
   (unless sealed
     (error "envelope-metadata: The 'sealed' was not found."))
   (if (sealed-envelope? sealed)
@@ -479,11 +392,10 @@ on every field, and returning either #t or #f representing validity status."
 
 (define* (seal-envelope #:key plaintext encryption-key signing-key
                         (key-id default-key-id) mac-key
-                        (version seal-format-version)
                         (created-at (current-time)) expires-at ttl-seconds)
   "Seal a plaintext string into a versioned, authenticated envelope.
 
-   The default output is
+   The output is
    @code{BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>}. Both an
    encryption key and a signing key are required. The MAC key may be supplied
    explicitly, or is derived from the signing key.
@@ -492,9 +404,6 @@ on every field, and returning either #t or #f representing validity status."
    #:key expires-at:  Unix timestamp after which the data must not be opened.
    #:key ttl-seconds: convenience; sets expires-at to created-at + ttl-seconds.
                       Give at most one of expires-at / ttl-seconds.
-   #:key version:     format version to emit (default the current one). Set to
-                      \"BWK1\" to produce a metadata-less envelope for readers
-                      that predate metadata.
 
    #:example
      (seal-envelope #:plaintext some-plaintext #:encryption-key k1
@@ -508,8 +417,6 @@ on every field, and returning either #t or #f representing validity status."
   (unless (valid-key-id? key-id)
     (error
      "seal-envelope: The 'key-id' must be a non-empty label without dots or whitespace."))
-  (unless (member version supported-seal-versions)
-    (error (format #f "seal-envelope: unsupported version '~a'" version)))
   (when (and expires-at ttl-seconds)
     (error
      "seal-envelope: give either 'expires-at' or 'ttl-seconds', not both."))
@@ -519,31 +426,24 @@ on every field, and returning either #t or #f representing validity status."
     (error "seal-envelope: The 'expires-at' must be an integer timestamp."))
   (when (and ttl-seconds (not (integer? ttl-seconds)))
     (error "seal-envelope: The 'ttl-seconds' must be an integer number of seconds."))
-  (when (and (equal? version legacy-seal-format-version)
-             (or expires-at ttl-seconds))
-    (error
-     "seal-envelope: a BWK1 envelope cannot carry an expiry; use the current version."))
   (let* ((effective-mac-key (or mac-key (derive-mac-key signing-key)))
          (effective-expires (cond (expires-at expires-at)
                                   (ttl-seconds (+ created-at ttl-seconds))
                                   (else #f)))
-         (legacy? (equal? version legacy-seal-format-version))
          (body (seal-string plaintext encryption-key signing-key))
-         (info (list (cons 'version version)
+         (info (list (cons 'version seal-format-version)
                      (cons 'key-id key-id)
-                     (cons 'created-at (and (not legacy?) created-at))
-                     (cons 'expires-at (and (not legacy?) effective-expires))
+                     (cons 'created-at created-at)
+                     (cons 'expires-at effective-expires)
                      (cons 'body body)))
          (mac (compute-mac (envelope-mac-message info) effective-mac-key)))
-    (if legacy?
-        (format #f "~a.~a.~a.~a" version key-id body mac)
-        (format #f "~a.~a.~a.~a.~a.~a" version key-id created-at
-                (or effective-expires no-expiry-marker) body mac))))
+    (format #f "~a.~a.~a.~a.~a.~a" seal-format-version key-id created-at
+            (or effective-expires no-expiry-marker) body mac)))
 
 (define* (open-envelope #:key sealed encryption-key signing-key mac-key keyring
                         (enforce-expiry? #t) (now (current-time))
                         max-age-seconds)
-  "Open a sealed envelope (or a legacy token) and return its plaintext string.
+  "Open a sealed envelope and return its plaintext string.
 
    Envelopes are integrity-checked with their MAC *before* any decryption is
    attempted, so tampering is reported explicitly. The MAC also covers the
@@ -556,17 +456,18 @@ on every field, and returning either #t or #f representing validity status."
    #:key keyring:         optional alist of key id to key entry; the entry's
                          @code{not-before} / @code{not-after} window is enforced.
 
-   A bare Base16 string (a legacy token produced before versioning) is accepted
-   and decrypted with the explicit keys."
+   Anything that is not an envelope of the current format version — an older
+   envelope, a pre-versioning bare Base16 token, or arbitrary text — is refused."
   (unless sealed
     (error "open-envelope: The 'sealed' was not found."))
-  (if (sealed-envelope? sealed)
-      (let* ((info (parse-envelope sealed))
-             (key-id (assoc-ref info 'key-id))
-             (created-at (assoc-ref info 'created-at))
-             (expires-at (assoc-ref info 'expires-at))
-             (body (assoc-ref info 'body))
-             (stored-mac (assoc-ref info 'mac)))
+  (unless (sealed-envelope? sealed)
+    (error (format #f "open-envelope: not a ~a envelope." seal-format-version)))
+  (let* ((info (parse-envelope sealed))
+         (key-id (assoc-ref info 'key-id))
+         (created-at (assoc-ref info 'created-at))
+         (expires-at (assoc-ref info 'expires-at))
+         (body (assoc-ref info 'body))
+         (stored-mac (assoc-ref info 'mac)))
         (let-values (((effective-encryption-key effective-signing-key
                        effective-mac-key)
                       (key-material #:keyring keyring #:key-id key-id
@@ -594,13 +495,7 @@ on every field, and returning either #t or #f representing validity status."
              (format #f
                      "open-envelope: the sealed data was created at ~a, older than the allowed maximum age of ~a seconds."
                      created-at max-age-seconds)))
-          (unseal-string body effective-encryption-key effective-signing-key)))
-      (begin
-        (unless encryption-key
-          (error "open-envelope: The 'encryption-key' was not found."))
-        (unless signing-key
-          (error "open-envelope: The 'signing-key' was not found."))
-        (unseal-string sealed encryption-key signing-key))))
+          (unseal-string body effective-encryption-key effective-signing-key))))
 
 (define* (unsafe-generate-token #:key encryption-key signing-key keyring
                                 (key-id default-key-id) mac-key
@@ -681,13 +576,12 @@ on every field, and returning either #t or #f representing validity status."
                                (now (current-time)))
   "Decodes and validates a secure token created by `generate-token`.
 
-  Versioned tokens carry a version tag, a key id and an integrity MAC. The MAC
-  is checked *before* decryption, so tampering is reported explicitly. Legacy
-  tokens (a bare Base16 string) are still accepted and decrypted with the
-  supplied keys.
+  Tokens carry a version tag, a key id and an integrity MAC. The MAC is checked
+  *before* decryption, so tampering is reported explicitly. Anything that is not
+  a current-version envelope is refused.
 
-  WARNING: This function depends on the `openssl`, `xxd` and `base64`
-  command-line utilities being available in the system's PATH.
+  All cryptography is performed in this process (see the module
+  `(bewaking crypto)`); no external command-line tools are involved.
 
   #:key token:          The token string to decrypt.
   #:key encryption-key: The key used for the inner AES-256 encryption.

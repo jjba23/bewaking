@@ -369,7 +369,7 @@ Examples:
          (metadata (envelope-metadata #:sealed token)))
     (unless metadata
       (cli-error
-       "token inspect: not a versioned sealed envelope (legacy tokens carry no metadata)"))
+       "token inspect: not a sealed envelope, so it carries no metadata"))
     (let ((number-or (lambda (value fallback)
                        (if value (number->string value) fallback))))
       (format #t "version:    ~a~%" (assoc-ref metadata 'version))
