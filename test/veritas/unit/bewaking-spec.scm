@@ -41,6 +41,10 @@
                       (loop (+ count 1)
                             (cons (get-random-char) chars))))))
 
+(define (raises? thunk)
+  "Return #t when calling the zero-argument @var{thunk} raises, else #f."
+  (catch #t (lambda () (thunk) #f) (lambda args #t)))
+
 (define get-owner-details
   (lambda ()
     `((id . "444959d3-7a8e-455e-b608-31e35145a2fa")
@@ -62,14 +66,19 @@
 
 ;; ====== Frozen envelopes of the earlier format versions ======
 ;;
-;; These three strings were sealed by the released code from *before* version 3
+;; These strings were sealed by the released code from *before* version 3
 ;; existed (commit 4ffd244), with the two keys above and the key id "2026a",
-;; and are kept verbatim here. Read compatibility is therefore tested against
-;; real artifacts instead of against whatever the current sealer happens to
-;; print: rewriting them would only test the sealer.
+;; and are kept verbatim here. They used to be opened for compatibility; now
+;; the module reads only BWK3, so they are kept as *rejection* fixtures: every
+;; one of them must be refused, with no plaintext and no metadata, exactly like
+;; arbitrary text. That way a reintroduced reader for an old format would fail
+;; the suite instead of slipping in.
 ;;
 ;;   BWK1 carries no timestamps and authenticates with an HMAC over
 ;;   "BWK1.<key-id>.<body>"; BWK2 adds the two timestamps to header and MAC.
+;;
+;; They are also the realistic thing an attacker would paste at a token API, so
+;; they double as "pasted someone else's old token" coverage.
 
 (define bwk1-envelope
   "BWK1.2026a.3d3d777446656270514d637a49705634384c6c4e426a7a306f6d31314f6c6749434a464456574d2b7a78334965726c306e69364f65543745716e6d4d774947323348527536564e5844523777372b31586b56476473463255.5127137487dd307f4e0a4d69c06706983944369f0200166d500e0988f466982a")
@@ -80,12 +89,9 @@
 (define bwk2-no-expiry-envelope
   "BWK2.2026a.1791715315.-.3d3d77512f794e4d546b45364f5a624263347749386a4f574a447267354e72574d774c512b2b6f6732445a3647744373696c62756a4a5875724e5544754369664d57443432484a4643316f45383831586b56476473463255.e4fdbe668517e8a1e3f08b1f1c1c03d2b126df8e17c8d3967a17b051b9e455c3")
 
-;; The plaintexts those envelopes carry.
-(define bwk1-plaintext
-  "legacy payload")
-
-(define bwk2-plaintext
-  "a payload")
+;; A bare, pre-versioning Base16 token (the shape the CLI used to emit).
+(define bare-base16-token
+  "3d4d714938487a384a56717573394169")
 
 
 (define generate-token-suite
@@ -325,7 +331,28 @@
                                                    some-valid-encryption-key
                                                    #:signing-key
                                                    some-valid-signing-key)
-                             #:name "round-trips a list payload"))))
+                             #:name "round-trips a list payload"))
+         (test "decrypted data is data, never code"
+               ;; The payload is parsed with `read', which does not evaluate.
+               ;; Guile's `#.' read-eval syntax is off by default, so a sealed
+               ;; value that *looks* like a program comes back as the string it
+               ;; was sealed as — knowing the format buys no code execution.
+               (assert-true (raises? (lambda ()
+                                       (read (open-input-string "#.(+ 1 2)"))))
+                            #:name "Guile refuses the #. read-eval syntax")
+               (assert-equal #:expect "#.(+ 1 2)"
+                             #:got (decrypt-object
+                                    #:object (encrypt-object
+                                              #:payload "#.(+ 1 2)"
+                                              #:encryption-key
+                                              some-valid-encryption-key
+                                              #:signing-key
+                                              some-valid-signing-key)
+                                    #:encryption-key
+                                    some-valid-encryption-key
+                                    #:signing-key
+                                    some-valid-signing-key)
+                             #:name "a sealed payload that looks like code stays a string"))))
 
 (define (tamper-hex-at s i)
   "Return @var{s} with the character at index @var{i} replaced by a different
@@ -345,10 +372,6 @@
   (open-envelope #:sealed (sealed-envelope-example)
                  #:encryption-key some-valid-encryption-key
                  #:signing-key some-valid-signing-key))
-
-(define (raises? thunk)
-  "Return #t when calling the zero-argument @var{thunk} raises, else #f."
-  (catch #t (lambda () (thunk) #f) (lambda args #t)))
 
 (define (tampered-envelope-rejected?)
   (let ((sealed (sealed-envelope-example)))
@@ -373,6 +396,26 @@
                             #:encryption-key some-valid-encryption-key
                             #:signing-key some-valid-signing-key))))
 
+(define (mutated-envelope-rejected? sealed)
+  "Return #t when no ciphertext-shaped mutation of @var{sealed} can be opened.
+
+   Every non-marker digit of the value is flipped in turn; with the source code
+   public, that is the cheapest forgery attempt there is — take a genuine
+   token and edit it. Each mutation must be refused."
+  (let loop ((index 0))
+    (cond ((= index (string-length sealed)) #t)
+          ((member (string-ref sealed index)
+                   '(#\. #\- #\B #\W #\K #\3))
+           (loop (+ index 1)))
+          ((raises? (lambda ()
+                      (open-envelope #:sealed (tamper-hex-at sealed index)
+                                     #:encryption-key
+                                     some-valid-encryption-key
+                                     #:signing-key
+                                     some-valid-signing-key)))
+           (loop (+ index 1)))
+          (else #f))))
+
 (define (with-envelope-field sealed index value)
   "Return @var{sealed} with dot-separated field @var{index} replaced by
    @var{value}, as an attacker editing the cleartext header would."
@@ -387,14 +430,39 @@
         (list-ref fields 2)
         (list-ref fields 4))))
 
-(define (wrong-mac-key-rejected?)
-  ;; Version 3 has no MAC key at all; the older envelopes still require the one
-  ;; they were sealed with, which here is derived from the signing key.
+(define (mac-key-option-gone?)
+  ;; Sealing and opening no longer take a MAC key. Passing one is a loud error
+  ;; rather than a silently ignored security parameter.
+  ;;
+  ;; The call is assembled with `apply' so the compiler does not flag the
+  ;; deliberately wrong arity: the extra keyword has to reach the procedure at
+  ;; run time in order to be rejected, which is the whole point of the test.
   (raises? (lambda ()
-             (open-envelope #:sealed bwk2-no-expiry-envelope
-                            #:encryption-key some-valid-encryption-key
-                            #:signing-key some-valid-signing-key
-                            #:mac-key "wrong-mac-key"))))
+             (apply open-envelope
+                    (list #:sealed (sealed-envelope-example)
+                          #:encryption-key some-valid-encryption-key
+                          #:signing-key some-valid-signing-key
+                          #:mac-key "ignored")))))
+
+(define (same-plaintext-seals-differ?)
+  ;; A fresh salt and nonce per payload: two seals of the same plaintext with
+  ;; the same keys must not be equal, or an observer could tell which sessions
+  ;; carry the same data.
+  (let ((a (sealed-envelope-example))
+        (b (sealed-envelope-example)))
+    (not (string=? a b))))
+
+(define (plaintext-absent-from-envelope?)
+  ;; The documented promise is that the sealed value leaks nothing a reader of
+  ;; the source could use. The cleartext payload must not appear in the
+  ;; envelope, not even in its Base16 form.
+  (let* ((secret "the-specific-owner-email-at-joe@example.com")
+         (sealed (seal-envelope #:plaintext secret
+                                #:encryption-key some-valid-encryption-key
+                                #:signing-key some-valid-signing-key)))
+    (and (not (string-contains sealed secret))
+         (not (string-contains sealed (base16-encode secret)))
+         (not (string-contains sealed (base64-encode secret))))))
 
 (define (tampered-token-rejected?)
   (let* ((t (generate-token #:encryption-key some-valid-encryption-key
@@ -440,9 +508,9 @@
                             #:name "the envelope starts with the version tag")
                (assert-equal #:expect "BWK3" #:got seal-format-version
                              #:name "the module exposes the current format version")
-               (assert-equal #:expect '("BWK3" "BWK2" "BWK1")
+               (assert-equal #:expect '("BWK3")
                              #:got readable-seal-format-versions
-                             #:name "the readable versions are listed for operators")
+                             #:name "BWK3 is the only version produced and read")
                (assert-equal #:expect "top secret payload"
                              #:got (envelope-round-trip-value)
                              #:name "the plaintext round-trips")
@@ -450,8 +518,8 @@
                             #:name "a tampered envelope fails the integrity check")
                (assert-true (wrong-signing-key-rejected?)
                             #:name "a wrong signing key fails the cipher check")
-               (assert-true (wrong-mac-key-rejected?)
-                            #:name "a wrong MAC key still fails an older envelope"))
+               (assert-true (mac-key-option-gone?)
+                            #:name "passing a MAC key to open-envelope is refused, not ignored"))
 
          (test "tokens and objects are envelopes and reject tampering"
                (assert-true (sealed-envelope?
@@ -473,13 +541,20 @@
                             #:name "a tampered token is rejected")
                (assert-true (tampered-object-rejected?)
                             #:name "a tampered object is rejected"))
-         (test "data that is not a readable envelope is refused"
+         (test "data that is not a BWK3 envelope is refused"
                (assert-false (sealed-envelope? "not-an-envelope")
                              #:name "arbitrary text is not an envelope")
-               (assert-true (sealed-envelope? bwk1-envelope)
-                             #:name "the version tag of every readable format is recognised")
                (assert-false (sealed-envelope? "BWK9.2026a.1.2.deadbeef")
                              #:name "an unknown envelope version is not recognised")
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (substring (sealed-envelope-example)
+                                                            0 25)
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "a truncated envelope is refused when it is opened")
                (assert-true (and (sealed-envelope? "BWK3.2026a.1.2.deadbeef.abc1")
                                  #t)
                             #:name "recognition is a version-tag check, not a structure check")
@@ -493,14 +568,6 @@
                             #:name "a BWK3 envelope carrying an extra MAC field is refused")
                (assert-true (raises? (lambda ()
                                        (open-envelope
-                                        #:sealed "BWK1.2026a.deadbeef.abc123"
-                                        #:encryption-key
-                                        some-valid-encryption-key
-                                        #:signing-key
-                                        some-valid-signing-key)))
-                            #:name "a BWK1 envelope whose MAC does not verify raises")
-               (assert-true (raises? (lambda ()
-                                       (open-envelope
                                         #:sealed "BWK9.2026a.1.2.deadbeef"
                                         #:encryption-key
                                         some-valid-encryption-key
@@ -511,14 +578,42 @@
                                             some-valid-encryption-key
                                             #:signing-key
                                             some-valid-signing-key
-                                            #:token "3d4d714938487a384a56717573394169")
+                                            #:token bare-base16-token)
                              #:name "a pre-versioning bare Base16 token is refused")
-               (assert-false (decrypt-object #:object "3d4d714938487a384a56717573394169"
+               (assert-false (decrypt-object #:object bare-base16-token
                                              #:encryption-key
                                              some-valid-encryption-key
                                              #:signing-key
                                              some-valid-signing-key)
                              #:name "a bare Base16 object is refused"))
+         (test "no reader is left for the earlier formats"
+               ;; Versions 1 and 2 authenticated with an HMAC. Keeping a reader
+               ;; around would keep that code reachable; there is none, and these
+               ;; frozen artifacts are refused with no plaintext and no metadata.
+               (assert-false (sealed-envelope? bwk1-envelope)
+                             #:name "a BWK1 envelope is not recognised")
+               (assert-false (sealed-envelope? bwk2-envelope)
+                             #:name "a BWK2 envelope is not recognised")
+               (assert-false (sealed-envelope? bwk2-no-expiry-envelope)
+                             #:name "a BWK2 envelope with no expiry is not recognised")
+               (assert-false (envelope-metadata #:sealed bwk1-envelope)
+                             #:name "no metadata is read out of a BWK1 envelope")
+               (assert-false (envelope-metadata #:sealed bwk2-envelope)
+                             #:name "no metadata is read out of a BWK2 envelope")
+               (assert-false (envelope-expired? #:sealed bwk2-envelope)
+                             #:name "an unreadable envelope is never reported as live")
+               (assert-false (decrypt-token #:token bwk2-envelope
+                                            #:encryption-key
+                                            some-valid-encryption-key
+                                            #:signing-key
+                                            some-valid-signing-key)
+                             #:name "a BWK2 token is refused even with the keys that sealed it")
+               (assert-false (decrypt-object #:object bwk1-envelope
+                                             #:encryption-key
+                                             some-valid-encryption-key
+                                             #:signing-key
+                                             some-valid-signing-key)
+                             #:name "a BWK1 object is refused likewise"))
          (test "key rotation with a keyring"
                (assert-true (keyring-rotation-works?)
                             #:name "a keyring seals and opens by key id"))
@@ -533,137 +628,48 @@
                                                   get-owner-details)
                                   "BWK3.rotate-1.")
                                  #t)
-                            #:name "the token carries the key id"))))
-
-;; ====== Reading the earlier envelope versions ======
-;;
-;; Version 3 is the only one produced now, but data sealed by BWK1 and BWK2 has
-;; to keep opening, so these tests open the frozen artifacts defined at the top
-;; of the file rather than anything sealed in this run.
-
-(define (opens-to? sealed plaintext)
-  (string=? plaintext
-            (open-envelope #:sealed sealed
-                           #:encryption-key some-valid-encryption-key
-                           #:signing-key some-valid-signing-key)))
-
-(define (opens-at? sealed plaintext now)
-  (string=? plaintext
-            (open-envelope #:sealed sealed
-                           #:encryption-key some-valid-encryption-key
-                           #:signing-key some-valid-signing-key
-                           #:now now)))
-
-(define (bwk2-resealed-with-mac-key mac-key)
-  "The BWK2 fixture with its MAC recomputed under @var{mac-key}.
-
-   An installation that provisioned an explicit MAC key sealed its data exactly
-   this way; the body is untouched, only the MAC differs, so reading it proves
-   that an opening call passes =#:mac-key= through to the verification. The
-   header of that fixture is BWK2.2026a.1791715315.-, and a BWK2 MAC is over the
-   header and body, so the message is rebuilt here without the MAC."
-  (let ((message (string-append "BWK2.2026a.1791715315.-"
-                                "."
-                                (envelope-body bwk2-no-expiry-envelope))))
-    (string-append message "." (hmac-sha256-hex mac-key message))))
-
-(define (old-envelope-metadata-field sealed field)
-  (assoc-ref (envelope-metadata #:sealed sealed) field))
-
-(define older-envelope-suite
-  (suite "Reading earlier envelope versions (BWK1 and BWK2)"
-         (test "a BWK1 envelope still opens"
-               (assert-true (opens-to? bwk1-envelope bwk1-plaintext)
-                            #:name "its plaintext comes back")
-               (assert-equal #:expect "BWK1"
-                             #:got (old-envelope-metadata-field bwk1-envelope
-                                                                  'version)
-                             #:name "its metadata reports version BWK1")
-               (assert-equal #:expect "2026a"
-                             #:got (old-envelope-metadata-field bwk1-envelope
-                                                                  'key-id)
-                             #:name "its key id is reported, so rotation still works")
-               (assert-false (old-envelope-metadata-field bwk1-envelope
-                                                            'created-at)
-                             #:name "BWK1 carried no created-at")
-               (assert-false (old-envelope-metadata-field bwk1-envelope
-                                                            'expires-at)
-                             #:name "BWK1 carried no expiry"))
-         (test "a BWK2 envelope still opens, expiry and all"
-               (assert-true (opens-to? bwk2-no-expiry-envelope bwk2-plaintext)
-                            #:name "an envelope with no expiry opens")
-               (assert-true (opens-at? bwk2-envelope bwk2-plaintext 1791716000)
-                            #:name "an unexpired envelope opens")
-               (assert-equal #:expect 1791715315
-                             #:got (old-envelope-metadata-field bwk2-envelope
-                                                                  'created-at)
-                             #:name "its created-at is reported")
-               (assert-equal #:expect 1791718915
-                             #:got (old-envelope-metadata-field bwk2-envelope
-                                                                  'expires-at)
-                             #:name "its expiry is reported")
-               (assert-true (raises? (lambda ()
-                                       (open-envelope
-                                        #:sealed bwk2-envelope
-                                        #:encryption-key
-                                        some-valid-encryption-key
-                                        #:signing-key
-                                        some-valid-signing-key
-                                        #:now 1791719000)))
-                            #:name "past its expiry it is refused"))
-         (test "the MAC of an older envelope is still enforced"
-               (assert-true (tampered-header-rejected? bwk2-envelope 2 "1000")
-                            #:name "editing created-at is caught by the MAC")
-               (assert-true (tampered-header-rejected? bwk2-envelope 4 "00")
-                            #:name "editing the body is caught by the MAC")
-               (assert-true (raises? (lambda ()
-                                       (open-envelope
-                                        #:sealed bwk1-envelope
-                                        #:encryption-key
-                                        "some-other-encryption-key"
-                                        #:signing-key
-                                        some-valid-signing-key)))
-                            #:name "the wrong encryption key is refused"))
-         (test "an older envelope sealed with an explicit MAC key still needs it"
-               (assert-equal #:expect bwk2-plaintext
-                             #:got (open-envelope
-                                    #:sealed (bwk2-resealed-with-mac-key
-                                              "a-provisioned-mac-key")
-                                    #:encryption-key some-valid-encryption-key
-                                    #:signing-key some-valid-signing-key
-                                    #:mac-key "a-provisioned-mac-key")
-                             #:name "the provisioned MAC key opens it")
-               (assert-true (raises? (lambda ()
-                                       (open-envelope
-                                        #:sealed (bwk2-resealed-with-mac-key
-                                                  "a-provisioned-mac-key")
-                                        #:encryption-key
-                                        some-valid-encryption-key
-                                        #:signing-key
-                                        some-valid-signing-key)))
-                            #:name "without it, the derived MAC key does not verify"))
-         (test "an older body cannot pass as a newer envelope"
-               (assert-true (raises? (lambda ()
-                                       (open-envelope
-                                        #:sealed (string-append
-                                                  "BWK3.default.1791715315.-."
-                                                  (envelope-body bwk2-envelope))
-                                        #:encryption-key
-                                        some-valid-encryption-key
-                                        #:signing-key
-                                        some-valid-signing-key)))
-                            #:name "a BWK2 body under a BWK3 header is refused")
-               (assert-true (raises? (lambda ()
-                                       (open-envelope
-                                        #:sealed (string-append
-                                                  "BWK2.default.1791715315.-."
-                                                  (envelope-body bwk1-envelope)
-                                                  ".00")
-                                        #:encryption-key
-                                        some-valid-encryption-key
-                                        #:signing-key
-                                        some-valid-signing-key)))
-                            #:name "a BWK1 body under a BWK2 header is refused"))))
+                            #:name "the token carries the key id"))
+         ;; ====== The source code is public ======
+         ;;
+         ;; bewaking is free software: an attacker has the algorithms, the
+         ;; layout, the constants and this test suite. What they do not have is
+         ;; the two keys. These tests pin the properties that make that
+         ;; distinction hold: the sealed value reveals nothing, every edit to a
+         ;; genuine value is refused, and the same plaintext never seals twice.
+         (test "knowing the format is not knowing the plaintext"
+               (assert-true (plaintext-absent-from-envelope?)
+                            #:name "the plaintext, its Base16 and its Base64 do not appear in the envelope")
+               (assert-true (string-prefix? "BWK3." (sealed-envelope-example))
+                            #:name "the format is not hidden, only the content is")
+               (assert-equal #:expect
+                             '(version key-id created-at expires-at)
+                             #:got (map car (envelope-metadata
+                                            #:sealed (sealed-envelope-example)))
+                             #:name "the public metadata is exactly what is authenticated"))
+         (test "editing a genuine envelope never yields a plaintext"
+               (assert-true (mutated-envelope-rejected? (sealed-envelope-example))
+                            #:name "every single-digit mutation of a real envelope is refused")
+               (assert-true (mutated-envelope-rejected?
+                             (encrypt-object #:payload '((role . admin))
+                                             #:encryption-key
+                                             some-valid-encryption-key
+                                             #:signing-key
+                                             some-valid-signing-key))
+                            #:name "and every mutation of a real sealed object too"))
+         (test "the same plaintext never seals to the same value"
+               (assert-true (same-plaintext-seals-differ?)
+                            #:name "a fresh salt and nonce make each envelope unique")
+               (assert-false (equal? (encrypt-object #:payload '((a . 1))
+                                                     #:encryption-key
+                                                     some-valid-encryption-key
+                                                     #:signing-key
+                                                     some-valid-signing-key)
+                                     (encrypt-object #:payload '((a . 1))
+                                                     #:encryption-key
+                                                     some-valid-encryption-key
+                                                     #:signing-key
+                                                     some-valid-signing-key))
+                             #:name "equal objects seal to different strings"))))
 
 ;; ====== Envelope metadata (rotation policy and audit) ======
 
@@ -704,25 +710,49 @@
                     #:encryption-key some-valid-encryption-key
                     #:signing-key some-valid-signing-key))))
 
-(define (retired-key-rejected?)
-  (let* ((keyring '((("2026a" (encryption-key . "enc-2026a")
-                             (signing-key . "sig-2026a")))))
+;; A keyring entry is (KEY-ID (encryption-key . K) (signing-key . K)
+;;               (not-before . T) (not-after . T)); the two windows are optional.
+;; The keys are distinctive strings rather than UUIDs so that a test failure
+;; cannot be blamed on a key being the one from the fixtures above.
+(define (rotation-keyring extra)
+  `(("2026a" (encryption-key . "enc-2026a")
+             (signing-key . "sig-2026a")
+             ,@extra)))
+
+(define (key-with-window-works?)
+  ;; Inside the window: sealing and opening both use the key. Sealing always
+  ;; uses the current time, so the window is chosen to contain it.
+  (let* ((keyring (rotation-keyring '((not-before . 1)
+                                      (not-after . 9999999999))))
          (sealed (encrypt-object #:payload '((v . 1)) #:keyring keyring
-                                 #:key-id "2026a"))
-         (retired '((("2026a" (encryption-key . "enc-2026a")
-                              (signing-key . "sig-2026a")
-                              (not-after . 1000))))))
-    (raises? (lambda ()
-               (unsafe-decrypt-object #:object sealed #:keyring retired)))))
+                                 #:key-id "2026a")))
+    (and (equal? '((v . 1)) (unsafe-decrypt-object #:object sealed
+                                                   #:keyring keyring))
+         (equal? '((v . 1)) (unsafe-decrypt-object #:object sealed
+                                                   #:keyring keyring
+                                                   #:now 9999999998)))))
+
+(define (retired-key-rejected?)
+  ;; Sealed with an active key, then opened after the key's not-after: the
+  ;; payload is intact, so only the rotation policy can be refusing it.
+  (let* ((active (rotation-keyring '()))
+         (retired (rotation-keyring '((not-after . 1000))))
+         (sealed (encrypt-object #:payload '((v . 1)) #:keyring active
+                                 #:key-id "2026a")))
+    (and (equal? '((v . 1)) (unsafe-decrypt-object #:object sealed
+                                                   #:keyring active))
+         (raises? (lambda ()
+                    (unsafe-decrypt-object #:object sealed #:keyring retired
+                                           #:now 2000))))))
 
 (define (future-key-rejected?)
+  ;; A key whose not-before is in the future must not be used to seal, even
+  ;; though the data would otherwise be perfectly sealable.
   (raises?
    (lambda ()
      (unsafe-encrypt-object #:payload '((v . 1)) #:key-id "2026a"
-                            #:keyring '((("2026a"
-                                         (encryption-key . "enc-2026a")
-                                         (signing-key . "sig-2026a")
-                                         (not-before . 9999999999))))))))
+                            #:keyring (rotation-keyring
+                                       '((not-before . 9999999999)))))))
 
 (define envelope-metadata-suite
   (suite "Envelope metadata (key id, created-at, expiry)"
@@ -743,9 +773,10 @@
                              #:name "the format version is reported")
                (assert-false (envelope-metadata #:sealed "not-an-envelope")
                              #:name "metadata is only read from envelopes")
-               (assert-equal #:expect "BWK1"
-                             #:got (metadata-field bwk1-envelope 'version)
-                             #:name "an older envelope's version is reported too"))
+               (assert-false (envelope-metadata #:sealed bwk1-envelope)
+                             #:name "an envelope of a dropped format reports no metadata")
+               (assert-false (metadata-field "BWK3.2026a.1000.-" 'version)
+                             #:name "a malformed BWK3 envelope reports no metadata"))
          (test "ttl-seconds records an absolute expiry"
                (assert-equal #:expect 1000
                              #:got (metadata-field (sealed-with-metadata)
@@ -801,8 +832,12 @@
                (assert-true (tampered-header-rejected? (sealed-envelope-example) 0
                                                        "BWK2")
                             #:name "relabelling the version is refused")
-               (assert-true (tampered-header-rejected? bwk2-envelope 2 "1000")
-                            #:name "editing created-at in a BWK2 envelope breaks its MAC"))
+               (assert-true (tampered-header-rejected? (sealed-envelope-example) 2
+                                                       "0")
+                            #:name "backdating created-at breaks the tag")
+               (assert-true (tampered-header-rejected? (sealed-envelope-example) 4
+                                                       "00")
+                            #:name "editing the body breaks the tag"))
          (test "expired tokens and objects are refused"
                (assert-true (expired-token-rejected?)
                             #:name "a token sealed with a past expiry is refused")
@@ -811,10 +846,15 @@
                (assert-false (envelope-expired? #:sealed "not-an-envelope")
                              #:name "expiry auditing ignores non-envelopes"))
          (test "keyring validity windows enforce rotation"
+               (assert-true (key-with-window-works?)
+                            #:name "a key inside its window seals and opens")
                (assert-true (retired-key-rejected?)
                             #:name "a key past not-after cannot open data")
                (assert-true (future-key-rejected?)
-                            #:name "a key before not-before cannot seal data"))
+                            #:name "a key before not-before cannot seal data")
+               (assert-true (list? (envelope-metadata #:sealed
+                                                      (sealed-envelope-example)))
+                            #:name "no keyring is needed to read metadata"))
          (test "a malformed envelope is rejected"
                (assert-true (raises? (lambda ()
                                        (open-envelope
@@ -834,20 +874,40 @@
                             #:name "a non-numeric created-at is refused")
                (assert-true (raises? (lambda ()
                                        (open-envelope
-                                        #:sealed "BWK2.2026a.1000.-.body"
+                                        #:sealed "BWK3.2026a.1000.-.not-hex"
                                         #:encryption-key
                                         some-valid-encryption-key
                                         #:signing-key
                                         some-valid-signing-key)))
-                            #:name "a BWK2 envelope missing its MAC field is refused")
+                            #:name "a body that is not hexadecimal is refused")
                (assert-true (raises? (lambda ()
                                        (open-envelope
-                                        #:sealed "BWK1.2026a.body"
+                                        #:sealed "BWK3.2026a.1000.-.abc"
                                         #:encryption-key
                                         some-valid-encryption-key
                                         #:signing-key
                                         some-valid-signing-key)))
-                            #:name "a BWK1 envelope missing its MAC field is refused"))
+                            #:name "a truncated body is refused")
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope
+                                        #:plaintext 'not-a-string
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key
+                                        some-valid-signing-key)))
+                            #:name "sealing a non-string plaintext is refused")
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope #:plaintext "x"
+                                                      #:encryption-key
+                                                      some-valid-encryption-key)))
+                            #:name "sealing without a signing key is refused")
+               (assert-true (raises? (lambda ()
+                                       (seal-envelope #:plaintext "x"
+                                                      #:encryption-key "x"
+                                                      #:signing-key
+                                                      some-valid-signing-key
+                                                      #:key-id "")))
+                            #:name "an empty key id is refused"))
          (test "invalid sealing options are rejected"
                (assert-true (raises? (lambda ()
                                        (seal-envelope
@@ -876,5 +936,5 @@
                garble-ungarble-string-suite has-needed-permissions-suite
                is-token-expired-suite token-helpers-suite
                generic-object-suite sealed-envelope-suite
-               older-envelope-suite envelope-metadata-suite))
+               envelope-metadata-suite))
 

@@ -52,7 +52,7 @@ Keys (required for token/object commands, unless --keyring is given):
   --key-id LABEL                key id embedded when sealing (default \"default\")
   Environment fallbacks: BEWAKING_ENCRYPTION_KEY, BEWAKING_SIGNING_KEY
 
-Rotation metadata (recorded in the sealed header and covered by the MAC):
+Rotation metadata (recorded in the sealed header and covered by the cipher tag):
   --ttl-seconds N               seal data that expires N seconds from now
   --expires-at TS               seal data that expires at an absolute Unix time
   --max-age-seconds N           refuse data sealed longer ago than N seconds

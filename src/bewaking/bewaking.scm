@@ -189,25 +189,6 @@ on every field, and returning either #t or #f representing validity status."
      (decrypt-payload \"U2FsdGVkX1+...\" \"mysecretkey\")"
   (kdf-decrypt payload k))
 
-(define (unseal-string sealed encryption-key signing-key)
-  "Open the body of a BWK1 or BWK2 envelope, returning its plaintext string.
-
-   Those versions seal a body as: AES-256 encrypt (encryption-key) -> garble ->
-   AES-256 encrypt (signing-key) -> garble -> base16 encode, with both AES
-   layers keyed through the KDF the sealer used. This reverses that: base16
-   decode -> ungarble -> AES-256 decrypt (signing-key) -> ungarble -> AES-256
-   decrypt (encryption-key). Each layer's payload names its own key-derivation
-   function, so no KDF has to be passed in here.
-
-   BWK3 bodies are opened by `open-authenticated-body` instead, which keeps the
-   inner layer and replaces this outer AES layer with AES-256-GCM."
-  (let* ((ddd (string-ungarble (base16-decode sealed)))
-         (decrypted-signed-payload (decrypt-payload ddd signing-key))
-         (decrypted-payload (decrypt-payload (string-ungarble
-                                              decrypted-signed-payload)
-                                             encryption-key)))
-    decrypted-payload))
-
 (define* (seal-authenticated-body plaintext encryption-key signing-key
                                   #:key (kdf default-kdf) associated-data)
   "Seal @var{plaintext} into the body of a BWK3 envelope, as Base16.
@@ -252,50 +233,36 @@ on every field, and returning either #t or #f representing validity status."
 ;;                  opened, or "-" when it never expires,
 ;;   - <body>       is an authenticated sealed payload, Base16-encoded.
 ;;
-;; Version 3 takes its integrity from the cipher itself: the body is sealed with
-;; AES-256-GCM under a key derived from the signing key, and the four header
-;; fields above are handed to the cipher as associated data. One tag therefore
-;; covers the ciphertext *and* the metadata, so there is no separate MAC and no
-;; second MAC key; the header cannot be read as authentic before the cipher has
-;; accepted it, and a refused tag means no plaintext is ever returned. The
-;; metadata can still be listed without any key, for auditing
+;; The integrity of the envelope comes from the cipher itself: the body is
+;; sealed with AES-256-GCM under a key derived from the signing key, and the
+;; four header fields above are handed to the cipher as associated data. One tag
+;; therefore covers the ciphertext *and* the metadata, so there is no separate
+;; MAC and no second MAC key; the header cannot be read as authentic before the
+;; cipher has accepted it, and a refused tag means no plaintext is ever
+;; returned. The metadata can still be listed without any key, for auditing
 ;; (`envelope-metadata`, `envelope-expired?`).
 ;;
-;; Two earlier versions are still read, so data sealed by them keeps opening:
-;;
-;;     BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
-;;     BWK1.<key-id>.<body>.<mac>
-;;
-;; Both authenticate with an HMAC-SHA256 `<mac>` over their header and body
-;; instead of a cipher tag, and BWK1 carries no timestamps at all. Only BWK3 is
-;; produced now: sealing needs no MAC key, and `seal-envelope` has none. A
-;; pre-versioning bare Base16 token, or arbitrary text, is not an envelope and
-;; is refused.
+;; BWK3 is the only version this module produces *and* the only one it reads.
+;; There is no reader for the earlier MAC-authenticated formats, no MAC key to
+;; provision, and no bare pre-versioning Base16 token: anything that is not a
+;; well-formed BWK3 envelope is refused rather than guessed at. Data sealed by
+;; an earlier release has to be re-sealed with `seal-envelope` or a fresh
+;; `generate-token`.
 
 (define seal-format-version
   "BWK3")
 
-;; Read compatibility, newest first: `seal-envelope' emits only
-;; `seal-format-version', `open-envelope' accepts every version listed here.
+;; The versions `open-envelope' accepts. Only the current one: the list exists
+;; so an operator or a caller can ask the library what it supports instead of
+;; assuming, and so a future version can extend it deliberately.
 (define readable-seal-format-versions
-  (cons seal-format-version '("BWK2" "BWK1")))
-
-;; The versions whose integrity is an HMAC over their header and body.
-(define mac-seal-format-versions
-  '("BWK2" "BWK1"))
+  (list seal-format-version))
 
 (define no-expiry-marker
   "-")
 
 (define default-key-id
   "default")
-
-(define (derive-mac-key signing-key)
-  "Derive the default HMAC key from the signing key.
-
-   A fixed domain-separation suffix is appended so that the MAC key differs
-   from the AES key even when the caller only supplies a signing key."
-  (string-append signing-key "|bewaking-mac-v1"))
 
 (define (valid-key-id? key-id)
   "Return #t when @var{key-id} is a non-empty label without dots or whitespace,
@@ -304,26 +271,6 @@ on every field, and returning either #t or #f representing validity status."
        (> (string-length key-id) 0)
        (not (string-contains key-id "."))
        (not (string-any char-set:whitespace key-id))))
-
-(define (compute-mac message mac-key)
-  "Compute HMAC-SHA256 of @var{message}, keyed by @var{mac-key}, and return it as
-   a lowercase hexadecimal string. The MAC is computed in this process with
-   libgcrypt; no external program is run."
-  (hmac-sha256-hex mac-key message))
-
-(define (constant-time-string=? a b)
-  "Compare two strings for equality without an early exit, to avoid leaking the
-   position of the first differing byte through timing."
-  (let ((length-a (string-length a)))
-    (if (not (= length-a (string-length b)))
-        #f
-        (let loop ((i 0) (difference 0))
-          (if (= i length-a)
-              (= difference 0)
-              (loop (+ i 1)
-                    (logior difference
-                            (logxor (char->integer (string-ref a i))
-                                    (char->integer (string-ref b i))))))))))
 
 (define (sealed-envelope? sealed)
   "Return #t when @var{sealed} is a bewaking envelope of any readable format
@@ -334,111 +281,82 @@ on every field, and returning either #t or #f representing validity status."
             readable-seal-format-versions)
        #t))
 
-(define (parse-expires-at raw version)
-  "Return the expiry timestamp recorded in the envelope field @var{raw} of a
-   @var{version} envelope, or #f for the no-expiry marker. Raises an error when
-   the field is neither."
+(define (parse-expires-at raw)
+  "Return the expiry timestamp recorded in the envelope field @var{raw}, or #f
+   for the no-expiry marker. Raises an error when the field is neither."
   (if (string=? raw no-expiry-marker)
       #f
       (let ((expires (string->number raw)))
         (unless (integer? expires)
-          (error
-           (format #f "bewaking: malformed ~a envelope (expires-at)" version)))
+          (error (format #f "bewaking: malformed ~a envelope (expires-at)"
+                         seal-format-version)))
         expires)))
 
 (define (parse-envelope sealed)
-  "Parse an envelope into an alist with @code{version}, @code{key-id},
-   @code{created-at}, @code{expires-at}, @code{body} and @code{mac}.
+  "Parse a BWK3 envelope into an alist with @code{version}, @code{key-id},
+   @code{created-at}, @code{expires-at} and @code{body}.
 
-   The timestamps are #f for BWK1, which carried none, and @code{mac} is #f for
-   BWK3, whose integrity comes from the tag inside its body rather than from a
-   separate MAC. Raises an error when the version is unsupported or the
-   structure is malformed."
-  (let* ((parts (string-split sealed #\.))
-         (version (car parts)))
-    (cond
-     ((string=? version "BWK1")
-      (unless (= (length parts) 4)
-        (error "bewaking: malformed BWK1 envelope"))
-      (list (cons 'version version)
-            (cons 'key-id (list-ref parts 1))
-            (cons 'created-at #f)
-            (cons 'expires-at #f)
-            (cons 'body (list-ref parts 2))
-            (cons 'mac (list-ref parts 3))))
-     ((string=? version "BWK2")
-      (unless (= (length parts) 6)
-        (error "bewaking: malformed BWK2 envelope"))
-      (let ((created-at (string->number (list-ref parts 2))))
-        (unless (integer? created-at)
-          (error "bewaking: malformed BWK2 envelope (created-at)"))
-        (list (cons 'version version)
-              (cons 'key-id (list-ref parts 1))
-              (cons 'created-at created-at)
-              (cons 'expires-at (parse-expires-at (list-ref parts 3) version))
-              (cons 'body (list-ref parts 4))
-              (cons 'mac (list-ref parts 5)))))
-     ((string=? version seal-format-version)
-      (unless (= (length parts) 5)
+   Raises an error when the value is not a BWK3 envelope, or when its structure
+   is malformed. No other format version is understood."
+  (unless (and (string? sealed)
+               (string-prefix? (string-append seal-format-version ".") sealed))
+    (error
+     (format #f "bewaking: not a bewaking envelope (expected ~a)."
+             seal-format-version)))
+  (let ((parts (string-split sealed #\.)))
+    (unless (= (length parts) 5)
+      (error (format #f "bewaking: malformed ~a envelope" seal-format-version)))
+    (let ((created-at (string->number (list-ref parts 2))))
+      (unless (integer? created-at)
         (error
-         (format #f "bewaking: malformed ~a envelope" seal-format-version)))
-      (let ((created-at (string->number (list-ref parts 2))))
-        (unless (integer? created-at)
-          (error
-           (format #f "bewaking: malformed ~a envelope (created-at)"
-                   seal-format-version)))
-        (list (cons 'version version)
-              (cons 'key-id (list-ref parts 1))
-              (cons 'created-at created-at)
-              (cons 'expires-at (parse-expires-at (list-ref parts 3) version))
-              (cons 'body (list-ref parts 4))
-              (cons 'mac #f))))
-     (else
-      (error
-       (format #f "bewaking: unsupported seal version '~a'" version))))))
+         (format #f "bewaking: malformed ~a envelope (created-at)"
+                 seal-format-version)))
+      (list (cons 'version seal-format-version)
+            (cons 'key-id (list-ref parts 1))
+            (cons 'created-at created-at)
+            (cons 'expires-at (parse-expires-at (list-ref parts 3)))
+            (cons 'body (list-ref parts 4))))))
 
 (define (envelope-header info)
   "Build the part of an envelope that precedes its body, from a parsed envelope
    alist as returned by `parse-envelope`.
 
-   For BWK3 this exact string is the associated data covered by the cipher tag;
-   for BWK1 and BWK2 it begins the string the MAC is computed over. BWK1 carried
-   no timestamps, so its header stops after the key id."
-  (let ((version (assoc-ref info 'version))
-        (key-id (assoc-ref info 'key-id))
+   This exact string is the associated data covered by the cipher tag, so
+   rebuilding it from parsed values and feeding it back to the cipher is what
+   binds the metadata to the payload."
+  (let ((key-id (assoc-ref info 'key-id))
         (created-at (assoc-ref info 'created-at))
         (expires-at (assoc-ref info 'expires-at)))
-    (if (string=? version "BWK1")
-        (format #f "~a.~a" version key-id)
-        (format #f "~a.~a.~a.~a" version key-id created-at
-                (or expires-at no-expiry-marker)))))
-
-(define (envelope-mac-message info)
-  "Build the exact string authenticated by the MAC of a BWK1 or BWK2 envelope —
-   its header and its body — from a parsed envelope alist as returned by
-   `parse-envelope`."
-  (format #f "~a.~a" (envelope-header info) (assoc-ref info 'body)))
+    (format #f "~a.~a.~a.~a" seal-format-version key-id created-at
+            (or expires-at no-expiry-marker))))
 
 (define* (envelope-metadata #:key sealed)
   "Return an alist of envelope metadata without needing any key:
    @code{version}, @code{key-id}, @code{created-at} and @code{expires-at}.
 
-   @code{expires-at} is #f when the data never expires; both timestamps are #f
-   for BWK1 envelopes, which carried none. Returns #f when @var{sealed} is not
-   an envelope of a readable version.
+   @code{expires-at} is #f when the data never expires. Returns #f when
+   @var{sealed} is not a well-formed envelope.
 
    Reading this needs no key, which is what makes it useful for auditing; the
-   metadata is authenticated by the envelope's own integrity protection — the
-   MAC for BWK1 and BWK2, the cipher tag for BWK3 — so `open-envelope` will not
-   act on it before that protection has been accepted."
+   metadata is authenticated by the envelope's cipher tag, so `open-envelope`
+   will not act on it before that protection has been accepted. Treat this
+   function's result as a *claim* to log, never as a decision: only
+   `open-envelope` can say whether the envelope is genuine."
   (unless sealed
     (error "envelope-metadata: The 'sealed' was not found."))
   (if (sealed-envelope? sealed)
-      (let ((info (parse-envelope sealed)))
-        (list (cons 'version (assoc-ref info 'version))
-              (cons 'key-id (assoc-ref info 'key-id))
-              (cons 'created-at (assoc-ref info 'created-at))
-              (cons 'expires-at (assoc-ref info 'expires-at))))
+      ;; A malformed envelope is not metadata, and an audit helper must not turn
+      ;; an unparseable input into an exception. #f means "nothing readable
+      ;; here", which is also the wrong thing to log and the right reason to
+      ;; refuse the value everywhere else.
+      (catch #t
+             (lambda ()
+               (let ((info (parse-envelope sealed)))
+                 (list (cons 'version (assoc-ref info 'version))
+                       (cons 'key-id (assoc-ref info 'key-id))
+                       (cons 'created-at (assoc-ref info 'created-at))
+                       (cons 'expires-at (assoc-ref info 'expires-at)))))
+             (lambda (key . args) #f))
       #f))
 
 (define* (envelope-expired? #:key sealed (now (current-time)))
@@ -447,7 +365,8 @@ on every field, and returning either #t or #f representing validity status."
    expiry and non-envelope values.
 
    This is an unauthenticated audit helper that reads the header only. Use
-   `open-envelope`, which verifies the MAC, to enforce expiry during decryption."
+   `open-envelope`, which verifies the cipher tag, to enforce expiry during
+   decryption."
   (let ((metadata (envelope-metadata #:sealed sealed)))
     (if metadata
         (let ((expires-at (assoc-ref metadata 'expires-at)))
@@ -459,8 +378,8 @@ on every field, and returning either #t or #f representing validity status."
    older than @var{max-age-seconds}.
 
    Only call this once the envelope's integrity has been verified: it acts on
-   the metadata, which is only trustworthy after the MAC or the cipher tag has
-   been accepted."
+   the metadata, which is only trustworthy once the cipher tag has been
+   accepted."
   (let ((expires-at (assoc-ref info 'expires-at))
         (created-at (assoc-ref info 'created-at))
         (key-id (assoc-ref info 'key-id)))
@@ -475,20 +394,16 @@ on every field, and returning either #t or #f representing validity status."
                "open-envelope: the sealed data was created at ~a, older than the allowed maximum age of ~a seconds."
                created-at max-age-seconds)))))
 
-(define* (key-material #:key keyring key-id encryption-key signing-key mac-key
+(define* (key-material #:key keyring key-id encryption-key signing-key
                        (now (current-time)))
-  "Resolve the encryption, signing and MAC keys to use.
+  "Resolve the encryption and signing keys to use.
 
    When @var{keyring} is supplied it takes precedence: it must be an alist
-   mapping a key id to an entry alist with `encryption-key`, `signing-key`,
-   (optional) `mac-key`, and optional `not-before` / `not-after` timestamps
-   describing the window during which the key may be used. Using a key outside
-   its window raises an error, which is how rotation policies are enforced.
-   Otherwise   the explicit keys are used. The MAC key defaults to
-   `derive-mac-key` of the signing key; it is only used by the older BWK1 and
-   BWK2 envelopes, whose integrity is an HMAC, and never when sealing, since a
-   BWK3 envelope takes its authenticity from the cipher tag. Returns three
-   values: encryption key, signing key, MAC key."
+   mapping a key id to an entry alist with `encryption-key`, `signing-key`, and
+   optional `not-before` / `not-after` timestamps describing the window during
+   which the key may be used. Using a key outside its window raises an error,
+   which is how rotation policies are enforced. Otherwise the explicit keys are
+   used. Returns two values: the encryption key and the signing key."
   (if keyring
       (let ((entry (assoc key-id keyring)))
         (unless entry
@@ -496,8 +411,7 @@ on every field, and returning either #t or #f representing validity status."
            (format #f "bewaking: no keyring entry for key id '~a'" key-id)))
         (let* ((entry-alist (cdr entry))
                (not-before (assoc-ref entry-alist 'not-before))
-               (not-after (assoc-ref entry-alist 'not-after))
-               (entry-signing-key (assoc-ref entry-alist 'signing-key)))
+               (not-after (assoc-ref entry-alist 'not-after)))
           (when (and not-before (> not-before now))
             (error
              (format #f "bewaking: the key '~a' is not valid yet." key-id)))
@@ -505,13 +419,8 @@ on every field, and returning either #t or #f representing validity status."
             (error
              (format #f "bewaking: the key '~a' has been retired." key-id)))
           (values (assoc-ref entry-alist 'encryption-key)
-                  entry-signing-key
-                  (or (assoc-ref entry-alist 'mac-key)
-                      (and entry-signing-key
-                           (derive-mac-key entry-signing-key))))))
-      (values encryption-key signing-key
-              (or mac-key
-                  (and signing-key (derive-mac-key signing-key))))))
+                  (assoc-ref entry-alist 'signing-key))))
+      (values encryption-key signing-key)))
 
 (define* (seal-envelope #:key plaintext encryption-key signing-key
                         (key-id default-key-id)
@@ -572,17 +481,16 @@ on every field, and returning either #t or #f representing validity status."
                                         (string->utf8 header))))
     (format #f "~a.~a" header body)))
 
-(define* (open-envelope #:key sealed encryption-key signing-key mac-key keyring
+(define* (open-envelope #:key sealed encryption-key signing-key keyring
                         (enforce-expiry? #t) (now (current-time))
                         max-age-seconds)
   "Open a sealed envelope and return its plaintext string.
 
-   A BWK3 envelope is opened with AES-256-GCM, whose tag also covers the
-   rotation metadata (key id, created-at, expires-at): no plaintext is returned
-   unless the tag verifies, so the metadata cannot be read as authentic before
-   the cipher has accepted it. A BWK1 or BWK2 envelope is checked against its
-   MAC *before* any decryption is attempted. Either way tampering is reported
-   explicitly, and neither format is trusted before that check.
+   The envelope is opened with AES-256-GCM, whose tag also covers the rotation
+   metadata (key id, created-at, expires-at): no plaintext is returned unless
+   the tag verifies, so the metadata cannot be read as authentic before the
+   cipher has accepted it, and tampering is reported explicitly rather than
+   decrypted and then distrusted.
 
    #:key enforce-expiry?: when #t (the default) an envelope whose
                          @code{expires-at} is in the past is rejected.
@@ -590,12 +498,10 @@ on every field, and returning either #t or #f representing validity status."
    #:key max-age-seconds: optional; reject envelopes created longer ago than this.
    #:key keyring:         optional alist of key id to key entry; the entry's
                          @code{not-before} / @code{not-after} window is enforced.
-   #:key mac-key:         optional HMAC key. Only the older BWK1 and BWK2
-                         envelopes use one; it defaults to a key derived from
-                         the signing key. BWK3 needs none.
 
-   Anything that is not an envelope of a readable version — a pre-versioning
-   bare Base16 token, or arbitrary text — is refused."
+   Anything that is not a well-formed BWK3 envelope — an envelope of an earlier
+   format version, a pre-versioning bare Base16 token, or arbitrary text — is
+   refused."
   (unless sealed
     (error "open-envelope: The 'sealed' was not found."))
   (unless (sealed-envelope? sealed)
@@ -603,41 +509,26 @@ on every field, and returning either #t or #f representing validity status."
      (format #f "open-envelope: not a bewaking envelope (expected ~a)."
              (string-join readable-seal-format-versions ", "))))
   (let* ((info (parse-envelope sealed))
-         (version (assoc-ref info 'version))
          (key-id (assoc-ref info 'key-id))
-         (body (assoc-ref info 'body))
-         (stored-mac (assoc-ref info 'mac)))
-    (let-values (((effective-encryption-key effective-signing-key
-                   effective-mac-key)
+         (body (assoc-ref info 'body)))
+    (let-values (((effective-encryption-key effective-signing-key)
                   (key-material #:keyring keyring #:key-id key-id
                                 #:encryption-key encryption-key
                                 #:signing-key signing-key
-                                #:mac-key mac-key
                                 #:now now)))
       (unless effective-encryption-key
         (error "open-envelope: no encryption key for this envelope."))
       (unless effective-signing-key
         (error "open-envelope: no signing key for this envelope."))
-      (if (member version mac-seal-format-versions)
-          ;; Older envelope: MAC first, then the metadata it protects, then the
-          ;; payload.
-          (begin
-            (unless (constant-time-string=?
-                     (compute-mac (envelope-mac-message info) effective-mac-key)
-                     stored-mac)
-              (error
-               "open-envelope: integrity check failed. The sealed data was tampered with or the wrong key was used."))
-            (check-envelope-freshness info enforce-expiry? now max-age-seconds)
-            (unseal-string body effective-encryption-key effective-signing-key))
-          ;; Current envelope: the tag is checked while the body is opened, so a
-          ;; plaintext exists only once the metadata has proved authentic; the
-          ;; freshness checks below therefore run on authenticated values.
-          (let ((plaintext (open-authenticated-body
-                            body effective-encryption-key effective-signing-key
-                            #:associated-data
-                            (string->utf8 (envelope-header info)))))
-            (check-envelope-freshness info enforce-expiry? now max-age-seconds)
-            plaintext)))))
+      ;; The tag is checked while the body is opened, so a plaintext exists only
+      ;; once the metadata has proved authentic; the freshness checks therefore
+      ;; run on authenticated values.
+      (let ((plaintext (open-authenticated-body
+                        body effective-encryption-key effective-signing-key
+                        #:associated-data
+                        (string->utf8 (envelope-header info)))))
+        (check-envelope-freshness info enforce-expiry? now max-age-seconds)
+        plaintext))))
 
 (define* (unsafe-generate-token #:key encryption-key signing-key keyring
                                 (key-id default-key-id)
@@ -696,7 +587,7 @@ on every field, and returning either #t or #f representing validity status."
 
     ;; Resolve the keys (explicit or from the keyring) and seal the payload
     ;; into a versioned, authenticated envelope.
-    (let-values (((effective-encryption-key effective-signing-key _)
+    (let-values (((effective-encryption-key effective-signing-key)
                   (key-material #:keyring keyring #:key-id key-id
                                 #:encryption-key encryption-key
                                 #:signing-key signing-key)))
@@ -714,23 +605,23 @@ on every field, and returning either #t or #f representing validity status."
                      #:kdf kdf))))
 
 (define* (unsafe-decrypt-token #:key token encryption-key signing-key
-                               mac-key keyring
+                               keyring
                                (enforce-expiry? #t) max-age-seconds
                                (now (current-time)))
   "Decodes and validates a secure token created by `generate-token`.
 
-  Tokens carry a version tag, a key id and an integrity MAC. The MAC is checked
-  *before* decryption, so tampering is reported explicitly. Anything that is not
-  a current-version envelope is refused.
+  Tokens carry a version tag, a key id and an authentication tag inside the
+  sealed body. The tag is checked *while* the token is opened, so tampering is
+  reported explicitly and no plaintext exists before authenticity is
+  established. Anything that is not a current-version envelope is refused.
 
   All cryptography is performed in this process (see the module
   `(bewaking crypto)`); no external command-line tools are involved.
 
   #:key token:          The token string to decrypt.
   #:key encryption-key: The key used for the inner AES-256 encryption.
-  #:key signing-key:    The key used for the outer AES-256 encryption and MAC.
-  #:key mac-key:        Optional explicit HMAC key; defaults to a key derived
-                        from the signing key.
+  #:key signing-key:    The key whose derived AES-256-GCM layer authenticates
+                        the envelope.
   #:key keyring:        Optional alist of key-id -> key entry. When supplied,
                         keys are selected using the token's own key id.
   #:key enforce-expiry?: When #t (the default), an envelope whose expiry has
@@ -753,7 +644,6 @@ on every field, and returning either #t or #f representing validity status."
   (let* ((decrypted-payload (open-envelope #:sealed token
                                            #:encryption-key encryption-key
                                            #:signing-key signing-key
-                                           #:mac-key mac-key
                                            #:keyring keyring
                                            #:enforce-expiry? enforce-expiry?
                                            #:max-age-seconds max-age-seconds
@@ -771,7 +661,7 @@ on every field, and returning either #t or #f representing validity status."
          (payload (deserialize-payload payload-string)))
     payload))
 
-(define* (decrypt-token #:key token encryption-key signing-key mac-key keyring
+(define* (decrypt-token #:key token encryption-key signing-key keyring
                         (enforce-expiry? #t) max-age-seconds)
   "Safely attempts to decrypt a given token.
    This function acts as a wrapper around `unsafe-decrypt-token`,
@@ -780,8 +670,8 @@ on every field, and returning either #t or #f representing validity status."
    Args:
      token: The token string to be decrypted.
      encryption-key: The key used for encryption.
-     signing-key: The key used for signing/verification.
-     mac-key: (Optional) The HMAC key; defaults to a value derived from the signing key.
+     signing-key: The key whose derived AES-256-GCM layer authenticates the
+                  envelope.
      keyring: (Optional) alist of key-id -> key entry for key rotation.
      enforce-expiry?: (Optional) when #t (the default) expired envelopes are rejected.
      max-age-seconds: (Optional) reject envelopes sealed longer ago than this.
@@ -794,7 +684,6 @@ on every field, and returning either #t or #f representing validity status."
            (unsafe-decrypt-token #:token token
                                  #:encryption-key encryption-key
                                  #:signing-key signing-key
-                                 #:mac-key mac-key
                                  #:keyring keyring
                                  #:enforce-expiry? enforce-expiry?
                                  #:max-age-seconds max-age-seconds))
@@ -871,7 +760,7 @@ on every field, and returning either #t or #f representing validity status."
     (error "encrypt-object: The 'encryption-key' was not found."))
   (unless (or keyring signing-key)
     (error "encrypt-object: The 'signing-key' was not found."))
-  (let-values (((effective-encryption-key effective-signing-key _)
+  (let-values (((effective-encryption-key effective-signing-key)
                 (key-material #:keyring keyring #:key-id key-id
                               #:encryption-key encryption-key
                               #:signing-key signing-key)))
@@ -907,19 +796,18 @@ on every field, and returning either #t or #f representing validity status."
            (display (format #f "Couldn't encrypt object: ~a: ~a" key args)) #f)))
 
 (define* (unsafe-decrypt-object #:key object encryption-key signing-key
-                                mac-key keyring
+                                keyring
                                 (enforce-expiry? #t) max-age-seconds
                                 (now (current-time)))
   "Reopen a string produced by `unsafe-encrypt-object`, returning the original
-   Scheme datum. Envelopes are integrity-checked with their MAC before any
-   decryption, so tampering is reported explicitly. Raises an error if the
-   object cannot be decrypted.
+   Scheme datum. The envelope's authentication tag is checked as it is opened,
+   so tampering is reported explicitly and no plaintext exists before that
+   check. Raises an error if the object cannot be decrypted.
 
    #:key object: The sealed string to decrypt.
    #:key encryption-key: The inner AES-256 key (string).
-   #:key signing-key: The outer AES-256 key (string).
-   #:key mac-key: Optional explicit HMAC key; defaults to a key derived from
-                 the signing key.
+   #:key signing-key: The key whose derived AES-256-GCM layer authenticates the
+                 envelope.
    #:key keyring: Optional alist of key-id -> key entry. When supplied, keys
                  are selected using the sealed data's own key id.
    #:key enforce-expiry?: When #t (the default), an object whose envelope expiry
@@ -937,7 +825,6 @@ on every field, and returning either #t or #f representing validity status."
   (let* ((decrypted-payload (open-envelope #:sealed object
                                            #:encryption-key encryption-key
                                            #:signing-key signing-key
-                                           #:mac-key mac-key
                                            #:keyring keyring
                                            #:enforce-expiry? enforce-expiry?
                                            #:max-age-seconds max-age-seconds
@@ -955,7 +842,7 @@ on every field, and returning either #t or #f representing validity status."
         payload)))
 
 (define* (decrypt-object #:key object encryption-key signing-key
-                         mac-key keyring
+                         keyring
                          (enforce-expiry? #t) max-age-seconds)
   "Safely reopen a string produced by `encrypt-object`. Wraps
    `unsafe-decrypt-object`, catching errors and returning #f instead of raising.
@@ -966,7 +853,6 @@ on every field, and returning either #t or #f representing validity status."
            (unsafe-decrypt-object #:object object
                                   #:encryption-key encryption-key
                                   #:signing-key signing-key
-                                  #:mac-key mac-key
                                   #:keyring keyring
                                   #:enforce-expiry? enforce-expiry?
                                   #:max-age-seconds max-age-seconds))

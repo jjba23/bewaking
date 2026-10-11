@@ -17,6 +17,7 @@
 
 (define-module (veritas unit crypto-spec)
   #:use-module (veritas veritas)
+  #:use-module (ice-9 format)
   #:use-module (rnrs bytevectors)
   #:use-module (bewaking crypto))
 
@@ -573,8 +574,214 @@
                              #:got (bytevector-u8-ref (base16->bytes "00ff") 1)
                              #:name "and keeps the raw octets, which base16-decode cannot"))))
 
+;; ====== The building blocks the payload format is assembled from ======
+;;
+;; The reference vectors above pin *what* the primitives compute. These check
+;; the properties the payload format depends on: that the key material comes
+;; from the named derivation, that every recorded parameter is actually used,
+;; that fresh randomness is fresh, and that bytes survive the encodings.
+
+(define (all-same-byte? bytes)
+  (let ((first (bytevector-u8-ref bytes 0)))
+    (let loop ((i 1))
+      (cond ((= i (bytevector-length bytes)) #t)
+            ((= first (bytevector-u8-ref bytes i)) (loop (+ i 1)))
+            (else #f)))))
+
+(define (bytes-distinct? a b)
+  (not (equal? a b)))
+
+(define kdf-material-suite
+  (suite "Derived key material"
+         (test "PBKDF2 key material is the PBKDF2 derivation's"
+               (assert-equal
+                #:expect
+                (bytes->base16
+                 (pbkdf2-sha256 "key" (make-bytevector 8 3) 32
+                                #:iterations 10000))
+                #:got
+                (bytes->base16
+                 (derive-key-material 'pbkdf2 "key" (make-bytevector 8 3) 32))
+                #:name "derive-key-material agrees with the primitive it names")
+               (assert-equal #:expect 32
+                             #:got (bytevector-length
+                                    (derive-key-material 'pbkdf2 "key"
+                                                         (make-bytevector 8 3)
+                                                         32))
+                             #:name "the requested length is produced"))
+         (test "Argon2id key material honours its parameters"
+               (assert-equal #:expect 48
+                             #:got (bytevector-length
+                                    (derive-key-material cheap-argon2id "key"
+                                                         (make-bytevector 16 3)
+                                                         48))
+                             #:name "the full key-and-IV length can be derived")
+               (assert-true
+                (bytes-distinct?
+                 (derive-key-material cheap-argon2id "key" (make-bytevector 16 3)
+                                      32)
+                 (derive-key-material '((kdf . argon2id) (memory-kib . 8192)
+                                        (iterations . 2) (parallelism . 1))
+                                      "key" (make-bytevector 16 3) 32))
+                #:name "changing the pass count changes the material")
+               (assert-true
+                (bytes-distinct?
+                 (derive-key-material cheap-argon2id "key" (make-bytevector 16 3)
+                                      32)
+                 (derive-key-material cheap-argon2id "another-key"
+                                      (make-bytevector 16 3) 32))
+                #:name "changing the passphrase changes the material"))
+         (test "an unknown derivation is refused"
+               (assert-true (raises? (lambda ()
+                                       (derive-key-material 'scrypt "key"
+                                                            (make-bytevector 8 3)
+                                                            32)))
+                            #:name "no other function can be named"))))
+
+(define randomness-suite
+  (suite "Randomness"
+         (test "random-bytes returns genuinely fresh bytes"
+               (assert-equal #:expect 8 #:got (bytevector-length (random-bytes))
+                             #:name "the default length is the OpenSSL salt length")
+               (assert-equal #:expect 32
+                             #:got (bytevector-length (random-bytes 32))
+                             #:name "the requested length is honoured")
+               (assert-true (bytes-distinct? (random-bytes 32) (random-bytes 32))
+                            #:name "two calls do not return the same bytes")
+               (assert-false (all-same-byte? (random-bytes 32))
+                             #:name "a draw is not a constant")
+               (assert-true (bytes-distinct? (random-bytes 16) (make-bytevector 16 0))
+                            #:name "a draw is not all zeroes"))))
+
+(define byte-encoding-suite
+  (suite "Encodings of raw bytes"
+         (test "Base16 round-trips arbitrary bytevectors"
+               (assert-true (equal? (make-bytevector 0 0)
+                                    (base16->bytes (bytes->base16
+                                                    (make-bytevector 0 0))))
+                            #:name "the empty bytevector round-trips")
+               (assert-true (equal? (make-bytevector 16 255)
+                                    (base16->bytes (bytes->base16
+                                                    (make-bytevector 16 255))))
+                            #:name "bytes that are not valid UTF-8 survive the round trip"))
+         (test "Base64 round-trips arbitrary bytevectors"
+               (assert-equal #:expect 3
+                             #:got (bytevector-length
+                                    (base64->bytes (bytes->base64
+                                                    (make-bytevector 3 7))))
+                             #:name "bytes that are not valid UTF-8 survive the round trip"))))
+
+(define (refused-with-message? thunk needle)
+  "Return #t when calling @var{thunk} raises an error whose text mentions
+   @var{needle}, so a test can tell *which* refusal happened rather than only
+   that something was refused."
+  (catch #t (lambda () (thunk) #f)
+         (lambda args
+           (let ((text (format #f "~a" args)))
+             (and (string-contains text needle) #t)))))
+
+(define (crafted-argon2id-payload memory-kib iterations parallelism)
+  "A GCM payload an untrusted client could send: the Argon2id id, the client's
+   own cost parameters, a salt, a nonce and a junk tag. Nothing about it is
+   authentic; the point is what a receiver is asked to *spend* before it can
+   tell, which is why the recorded parameters must be bounded on arrival."
+  (let ((raw (make-bytevector (+ 1 12 16 12 16) 0)))
+    (bytevector-u8-set! raw 0 2)
+    (bytevector-uint-set! raw 1 memory-kib (endianness big) 4)
+    (bytevector-uint-set! raw 5 iterations (endianness big) 4)
+    (bytevector-uint-set! raw 9 parallelism (endianness big) 4)
+    (bytes->base16 raw)))
+
+(define gcm-hygiene-suite
+  (suite "Authenticated payload hygiene"
+         (test "every payload uses a fresh salt and nonce"
+               ;; `sealed-authenticated-payload' above pins the format with a
+               ;; fixed salt and nonce; here the defaults must draw their own.
+               (let ((a (gcm-encrypt (string->utf8 gcm-plaintext) encryption-key))
+                     (b (gcm-encrypt (string->utf8 gcm-plaintext) encryption-key)))
+                 (assert-false (string=? a b)
+                               #:name "sealing the same plaintext twice does not repeat the payload")
+                 (assert-false (string=? (substring a 2 34) (substring b 2 34))
+                               #:name "the recorded salts differ, so the derived keys do too")
+                 (assert-false (string=? (substring a 34 58) (substring b 34 58))
+                               #:name "the recorded nonces differ as well")))
+         (test "the salt and the nonce are used, not decorative"
+               (assert-true (authenticated-payload-refused?
+                             (flipped-hex-digit gcm-pbkdf2-payload 26))
+                            #:name "editing a salt digit breaks the tag")
+               (assert-true (authenticated-payload-refused?
+                             (flipped-hex-digit gcm-pbkdf2-payload 58))
+                            #:name "editing a nonce digit breaks the tag")
+               (assert-true (authenticated-payload-refused?
+                             (flipped-hex-digit gcm-argon2id-payload 2))
+                            #:name "editing an Argon2id parameter digit is refused"))
+         (test "the associated data is authenticated but not stored"
+               (assert-false (string-contains (sealed-authenticated-payload 'pbkdf2)
+                                              (base16-encode gcm-associated-data))
+                             #:name "the associated data does not appear in the payload")
+               (assert-true (authenticated-payload-refused?
+                             (sealed-authenticated-payload 'pbkdf2)
+                             #:associated-data (string-append gcm-associated-data
+                                                             "!"))
+                            #:name "one extra associated-data byte breaks the tag"))
+         (test "an empty plaintext is still authenticated"
+               (assert-true
+                (string=? ""
+                          (utf8->string
+                           (gcm-decrypt (gcm-encrypt (make-bytevector 0 0)
+                                                     encryption-key)
+                                        encryption-key)))
+                #:name "the empty plaintext round-trips")
+               (assert-true (>= (string-length
+                                 (gcm-encrypt (make-bytevector 0 0) encryption-key))
+                                (* 2 (+ 1 16 12 16)))
+                            #:name "even an empty payload carries a salt, a nonce and a tag"))
+         (test "the recorded derivation cost is bounded before it is spent"
+               ;; The Argon2id parameters travel *inside* the payload, so an
+               ;; attacker chooses them. They are validated before any memory is
+               ;; allocated or any pass is run, so a crafted body is refused
+               ;; rather than obeyed; the messages name Argon2id, which is how
+               ;; these tests know the refusal is the bound and not a failed tag.
+               (assert-true (refused-with-message?
+                             (lambda ()
+                               (gcm-decrypt
+                                (crafted-argon2id-payload 4194305 1 1)
+                                encryption-key))
+                             "Argon2id")
+                            #:name "a memory cost above the cap is refused, not allocated")
+               (assert-true (refused-with-message?
+                             (lambda ()
+                               (gcm-decrypt
+                                (crafted-argon2id-payload 8 1 16777216)
+                                encryption-key))
+                             "Argon2id")
+                            #:name "a lane count above the cap is refused")
+               (assert-true (refused-with-message?
+                             (lambda ()
+                               (gcm-decrypt
+                                (crafted-argon2id-payload 8 0 1)
+                                encryption-key))
+                             "Argon2id")
+                            #:name "a zero pass count is refused")
+               (assert-true (refused-with-message?
+                             (lambda ()
+                               (gcm-decrypt
+                                (crafted-argon2id-payload 8 1 2)
+                                encryption-key))
+                             "Argon2id")
+                            #:name "less than 8 KiB per lane is refused")
+               (assert-true (refused-with-message?
+                             (lambda ()
+                               (gcm-decrypt
+                                (crafted-argon2id-payload 8192 1 1)
+                                encryption-key))
+                             "GCM authentication failed")
+                            #:name "a cost inside the bounds is derived, then fails the tag: the bound is not a blanket refusal"))))
+
 (define (spec)
   (veritas-run base16-suite base64-suite hmac-suite pbkdf2-suite
                argon2id-suite kdf-spec-suite sealed-payload-suite
                authenticated-payload-suite
-               openssl-compatibility-suite))
+               openssl-compatibility-suite
+               kdf-material-suite randomness-suite byte-encoding-suite
+               gcm-hygiene-suite))

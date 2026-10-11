@@ -340,6 +340,98 @@
                                                          "--no-symbols")))))
                              #:name "symbols are excluded on request"))))
 
+;; ====== Key derivation, tampering and dropped formats ======
+
+;; A BWK2 token of the right shape: version tag, key id, timestamps, body and
+;; MAC. The library only reads BWK3 now, so the CLI must refuse it rather than
+;; `inspect` it as a live session or `decrypt` it with the keys that sealed it.
+(define legacy-bwk2-token
+  "BWK2.2026a.1791715315.1791718915.3d3d774f3141672b664b4e6b77436a364939715936726c6b4e6e4d334c41476d744a37445a5831483663482b4e7a76653174626d556a2f426d4f647779384e773066495476422b4141794265312f31586b56476473463255.acb8a942c0cb195c275de2d89b4c984479437f1f6d62a097650fb395087e8ae1")
+
+(define legacy-bwk1-token
+  "BWK1.2026a.3d3d777446656270514d637a49705634384c6c4e426a7a306f6d31314f6c6749434a464456574d2b7a78334965726c306e69364f65543745716e6d4d774947323348527536564e5844523777372b31586b56476473463255.5127137487dd307f4e0a4d69c06706983944369f0200166d500e0988f466982a")
+
+(define (flip-hex-digit s index)
+  "Return @var{s} with the character at @var{index} replaced by a different
+   hexadecimal digit."
+  (let* ((ch (string-ref s index))
+         (replacement (if (char=? ch #\0) #\1 #\0)))
+    (string-append (substring s 0 index)
+                   (string replacement)
+                   (substring s (+ index 1) (string-length s)))))
+
+(define (argon2id-round-trip-works?)
+  (let* ((generated (run-cli (list "token" "generate"
+                                   "--owner-id" "owner-1"
+                                   "--encryption-key" encryption-key
+                                   "--signing-key" signing-key
+                                   "--kdf" "argon2id"
+                                   "--kdf-memory-kib" "8192"
+                                   "--kdf-iterations" "1")))
+         (token (string-trim-right (cli-out generated)))
+         (decrypted (run-cli (list "token" "decrypt" "--token" token
+                                   "--encryption-key" encryption-key
+                                   "--signing-key" signing-key))))
+    (and (= 0 (cli-code generated))
+         (and (string-contains token "BWK3.") #t)
+         (= 0 (cli-code decrypted))
+         (and (string-contains (cli-out decrypted) "owner-1") #t))))
+
+(define (kdf-parameter-without-name-rejected?)
+  (= 1 (cli-code (run-cli (list "token" "generate"
+                                "--owner-id" "owner-1"
+                                "--encryption-key" encryption-key
+                                "--signing-key" signing-key
+                                "--kdf-memory-kib" "8192")))))
+
+(define (legacy-token-refused? token)
+  ;; Neither command may treat a dropped format as a session: decrypting must
+  ;; fail even though these were sealed with the keys passed in, and inspect
+  ;; must not print metadata for them.
+  (and (= 1 (cli-code (run-cli (list "token" "decrypt" "--token" token
+                                     "--encryption-key" encryption-key
+                                     "--signing-key" signing-key))))
+       (= 1 (cli-code (run-cli (list "token" "inspect" "--token" token))))))
+
+(define (tampered-token-refused?)
+  (let* ((generated (token-generate))
+         (token (string-trim-right (cli-out generated)))
+         (tampered (flip-hex-digit token
+                                   (quotient (string-length token) 2))))
+    (= 1 (cli-code (run-cli (list "token" "decrypt" "--token" tampered
+                                  "--encryption-key" encryption-key
+                                  "--signing-key" signing-key))))))
+
+(define (missing-owner-id-refused?)
+  (= 1 (cli-code (run-cli (list "token" "generate"
+                                "--encryption-key" encryption-key
+                                "--signing-key" signing-key)))))
+
+(define (object-without-keys-refused?)
+  (= 1 (cli-code (run-cli '("object" "encrypt")))))
+
+(define format-policy-suite
+  (suite "CLI key derivation and dropped formats"
+         (test "the key derivation is chosen when sealing and read back when opening"
+               (assert-true (argon2id-round-trip-works?)
+                            #:name "an Argon2id token round-trips through the CLI")
+               (assert-true (kdf-parameter-without-name-rejected?)
+                            #:name "a KDF parameter without --kdf is refused"))
+         (test "envelopes of dropped formats are refused"
+               (assert-true (legacy-token-refused? legacy-bwk1-token)
+                            #:name "a BWK1 token cannot be decrypted or inspected")
+               (assert-true (legacy-token-refused? legacy-bwk2-token)
+                            #:name "a BWK2 token cannot be decrypted or inspected")
+               (assert-true (legacy-token-refused? "")
+                            #:name "an empty token is refused"))
+         (test "tampering and missing arguments are refused"
+               (assert-true (tampered-token-refused?)
+                            #:name "an edited token exits with 1")
+               (assert-true (missing-owner-id-refused?)
+                            #:name "generating without an owner id exits with 1")
+               (assert-true (object-without-keys-refused?)
+                            #:name "sealing an object without keys exits with 1"))))
+
 (define (spec)
   (veritas-run dispatch-suite token-suite object-suite password-suite
-               rotation-metadata-suite))
+               rotation-metadata-suite format-policy-suite))

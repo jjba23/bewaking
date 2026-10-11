@@ -16,6 +16,58 @@ If you like my work, please support me by [[https://bmc.link/jjbigorra][buying m
 
 ----------------
 
+* Explain like I'm 5: how the security works
+
+Imagine you want to send a secret note to a friend through a post office you do
+not trust, and you also want your friend to be sure the note really came from
+you and was not edited on the way.
+
+1. *You put the note in a box and lock it.* The box is locked with your
+   =encryption-key=. Only someone holding that key can open the box. A person
+   handling the mail sees a solid box, not words.
+2. *You wrap the whole box in a second, different lock.* That second lock is
+   the =signing-key=, and it is a separate key on purpose: two locks, two
+   keys, no single point of failure.
+3. *You write a label on the outside:* who the note is for, when you made it,
+   and when it should be thrown away. The second lock is special — it seals the
+   label *together with* the box. If anybody edits the label, say "keep this
+   forever" instead of "throw this away tomorrow", the lock does not open at
+   all. It does not open and then smell wrong; it simply does not open.
+4. *The whole parcel is written in a plain alphabet* (hexadecimal), so it can
+   travel through email, URLs and cookies without breaking.
+
+Five things follow from that, and they are worth remembering:
+
+- *The keys are the secret, not the method.* Everyone — including anyone
+  reading this file and every line of bewaking's source code — can know exactly
+  how the box is built. That is fine, and it is on purpose. If publishing the
+  source code gave away the secret, the design would be broken. It is not: see
+  [[#what-the-source-code-gives-an-attacker][What the source code gives an
+  attacker]].
+- *Every box looks different.* Each seal draws fresh random numbers, so sealing
+  the same note twice produces two completely different parcels. Someone
+  watching the mail cannot tell which two parcels carry the same note.
+- *Every edit is noticed.* Change one character of the box, or of the label,
+  and the parcel refuses to open. You cannot swap the note, correct a date, or
+  swap which key the label claims was used.
+- *Old parcels do not need re-sending when you rotate keys.* The label says
+  which key was used, so the right key can be picked automatically (see
+  [[#key-rotation][key rotation]]).
+- *A parcel can be given a "throw away after" date* that the recipient's
+  server checks before it opens anything, so a stolen parcel stops working on
+  its own.
+
+And the one thing this cannot do:
+
+- *It cannot protect a weak key.* If your =encryption-key= is =hunter2=, a
+  determined attacker can simply guess it. All the strength in the system comes
+  from the keys being long, random and secret. Use long random values, keep
+  them out of source control, logs and screenshots, and never reuse one pair
+  across development and production. See
+  [[#choosing-and-keeping-keys][Choosing and keeping keys]].
+
+----------------
+
 * About bewaking
 
 /bewaking/ means surveillance in the Dutch language.
@@ -25,6 +77,11 @@ HMAC-SHA256, Base16 and Base64 — runs inside the Guile process. bewaking spawn
 no subprocesses, so it needs no external command-line tools, and the payload
 layout it produces is byte-for-byte the one ~openssl enc -aes256 -pbkdf2~
 produces.
+
+There is exactly one envelope format, =BWK3=: it is the only one bewaking
+writes and the only one it reads. Anything else — an envelope of an earlier
+release, or an unstructured string that merely looks like a token — is refused
+rather than guessed at.
 
 You can find the technical Guile Scheme API documentation for Bewaking here:
 
@@ -64,9 +121,10 @@ other implementation of that format, still opens. The corresponding reference
 values live in the test suite, so the compatibility is checked without needing
 OpenSSL installed.
 
-That layout is what a whole BWK1 or BWK2 body looks like, and it is still the
-inner layer of every BWK3 body: sealing has kept the CBC layer and replaced the
-outer AES-CBC stage with AES-256-GCM.
+That layout is the inner layer of every sealed body: bewaking kept the
+OpenSSL-compatible CBC layer and replaced the outer AES-CBC stage with
+AES-256-GCM, so the double encryption is still there and only the outer,
+authenticating layer changed.
 
 ** Development and testing dependencies
 
@@ -251,7 +309,7 @@ catch errors, print a message, and return =#f=.
 | Function                        | Arguments                                                                  | Returns                                     |
 |---------------------------------+----------------------------------------------------------------------------+---------------------------------------------|
 | ~generate-token~                | =#:encryption-key=, =#:signing-key=, =#:get-owner-details=, =#:token-validity-seconds=, =#:key-id=, =#:keyring=, =#:ttl-seconds=, =#:expires-at= | token string, or =#f= on failure            |
-| ~decrypt-token~                 | =#:token=, =#:encryption-key=, =#:signing-key=, =#:mac-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds= | payload alist, or =#f= on failure           |
+| ~decrypt-token~                 | =#:token=, =#:encryption-key=, =#:signing-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds= | payload alist, or =#f= on failure           |
 | ~unsafe-generate-token~         | same as ~generate-token~                                                    | token string (raises on failure)            |
 | ~unsafe-decrypt-token~          | same as ~decrypt-token~                                                     | payload alist (raises on failure)           |
 | ~token-payload-valid?~          | =payload=                                                                   | =#t= when every required field is present   |
@@ -259,10 +317,13 @@ catch errors, print a message, and return =#f=.
 | ~token-remaining-seconds~       | =#:token=                                                                   | seconds left (negative once expired)        |
 | ~token-valid?~                  | =#:token=                                                                   | =#t= when well-formed *and* unexpired       |
 
-=#:mac-key= appears on the *opening* functions only. Version 3 has no MAC — the
-cipher tag is the integrity check — so ~generate-token~ has no such option,
-while reading a BWK1 or BWK2 envelope still uses the MAC key it was sealed with
-(by default one derived from the signing key).
+There is no MAC key anywhere in this API. The envelope's integrity is the
+cipher tag inside its body, so sealing and opening both need exactly two keys:
+an =encryption-key= and a =signing-key=. Older releases accepted a =#:mac-key=
+when reading the MAC-authenticated formats they produced; those formats are gone,
+and passing =#:mac-key= now raises =Unrecognized keyword= rather than being
+silently ignored — a security parameter that no longer does anything should not
+be accepted quietly.
 
 *** Checking a token's lifetime
 
@@ -278,7 +339,8 @@ decrypting a token; passing an arbitrary alist is not meaningful.
 
 These helpers examine the *decrypted payload*, whose expiry comes from
 =#:token-validity-seconds=. The envelope itself can carry an independent expiry
-(see [[#sealed-envelope][Versioned and authenticated seals]]) via =#:ttl-seconds= or =#:expires-at=;
+(see [[#versioned-and-authenticated-seals][Versioned and authenticated seals]])
+via =#:ttl-seconds= or =#:expires-at=;
 ~decrypt-token~ refuses to open a token whose envelope expiry has passed, so
 the two together let you bound a token both by its payload lifetime and by the
 rotation policy of the key that sealed it.
@@ -363,25 +425,30 @@ can still be *audited without any key* through ~envelope-metadata~, which is wha
 makes log review and rotation tooling possible. Reading the metadata is not the
 same as trusting it: ~open-envelope~ is the only place that decides.
 
-*** Versions 1 and 2 are still read
+*** There is no reader for the earlier formats
 
-Two earlier formats keep opening, so data sealed before this version does not
-have to be re-issued:
+Two earlier formats authenticated with an HMAC-SHA256 =<mac>= over their header
+and body instead of a cipher tag, and one of them carried no timestamps at all:
 
 #+begin_src text
 BWK2.<key-id>.<created-at>.<expires-at>.<body>.<mac>
 BWK1.<key-id>.<body>.<mac>
 #+end_src
 
-Both authenticate with an HMAC-SHA256 =<mac>= over their header and body instead
-of a cipher tag, and BWK1 carries no timestamps at all. Opening a BWK1 or BWK2
-envelope still verifies its MAC *before* decrypting, and still honours the MAC
-key it was sealed with (=#:mac-key=, by default derived from the signing key).
-Only BWK3 is *produced*: sealing needs no MAC key, and ~seal-envelope~ has none.
-A pre-versioning bare Base16 token, arbitrary text, or an envelope whose version
-is not one of the three is refused, with a message naming what was expected:
-=not a bewaking envelope (expected BWK3, BWK2, BWK1)=. The readable versions are
-exposed as ~readable-seal-format-versions~.
+Those readers are gone. Keeping an old reader alive keeps its code reachable,
+and a second authentication path is a second thing to get right; there is
+exactly one, the GCM tag. A BWK1 or BWK2 string is therefore refused with the
+same message as arbitrary text — =not a bewaking envelope (expected BWK3)= —
+with no plaintext and no metadata read out of it, even when the keys that sealed
+it are supplied. Data sealed by an earlier release must be re-sealed, which is
+one ~generate-token~ (or ~encrypt-object~) call away. Pre-versioning bare Base16
+tokens are refused the same way.
+
+The frozen BWK1 and BWK2 envelopes in the test suite are kept on purpose: they
+now serve as *rejection* fixtures, so a reintroduced reader for an old format
+would fail the suite instead of slipping back in. The only format versions
+bewaking knows are exposed as ~readable-seal-format-versions~, and today that
+list contains just the one entry.
 
 ** Rotation metadata: expiry and audit
 
@@ -416,7 +483,7 @@ exist for recovery and audit: they open expired data instead of refusing it.
 | Function              | Arguments                                                                                                  | Returns                                        |
 |-----------------------+------------------------------------------------------------------------------------------------------------+------------------------------------------------|
 | ~seal-envelope~       | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:created-at=, =#:expires-at=, =#:ttl-seconds= | envelope string               |
-| ~open-envelope~       | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:mac-key= (older envelopes only), =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry) |
+| ~open-envelope~       | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry) |
 | ~sealed-envelope?~    | =sealed=                                                                                                    | =#t= when it is a versioned envelope          |
 | ~envelope-metadata~   | =#:sealed=                                                                                                  | alist of version/key-id/created-at/expires-at |
 | ~envelope-expired?~   | =#:sealed=, =#:now=                                                                                         | =#t= when the recorded expiry has passed      |
@@ -477,18 +544,22 @@ data to the lifetime of the key that protects it. The command line reports the
 precise reason for a refusal, so a failed open tells you whether the data
 expired or the key was retired.
 
-*** Producing one version, reading three
+*** One format, one integrity check
 
-BWK3 is the only version produced; BWK1, BWK2 and BWK3 are all read, so data
-sealed by an earlier release keeps opening. Nothing needs re-issuing or
-migrating: an old token is still a working token, and the key id inside it still
-selects its key from the keyring. What is *not* read is data that predates the
-versioned envelope (a bare Base16 string with no dots): it carries no tag or MAC
-at all, so accepting it would mean decrypting on a guess. Such a token is refused
-with a message saying so, and re-issuing it is one ~generate-token~ call away.
-Envelopes of the three versions are told apart by their version tag alone, so
-there is no auto-detection to be fooled; the formats are not interchangeable,
-and a body sealed for one version does not open under another's header.
+BWK3 is the only envelope format bewaking writes and the only one it reads.
+There is no dual path, no auto-detection and no downgrade: the version tag is
+checked against the one known value before anything else is parsed, so a string
+labelled =BWK1=, =BWK2= or =BWK9= is refused at the door with the same message as
+arbitrary text. A body sealed for one header does not open under another's:
+the header is part of what the tag authenticates, so relabelling an envelope
+breaks it rather than changing what it means.
+
+That single path is the point. A token is opened by one code route — decode,
+verify the GCM tag, then decrypt — and a body with an extra =.mac= field or an
+unexpected number of header fields is malformed rather than "an older shape".
+The frozen legacy envelopes in the test suite exist only to prove they are
+refused, and the version list ~readable-seal-format-versions~ holds exactly one
+entry.
 
 ----------------
 
@@ -1098,13 +1169,14 @@ unpredictable output across runs.
 - *Malformed input is refused early.* A wrong key surfaces as a padding or
   format error before any payload is parsed, instead of being mistaken for
   valid data. Base64 and Base16 input is validated character by character.
-- *Authenticity is checked explicitly.* Sealed data carries a version tag, and
-  the version decides how it is authenticated. BWK3 derives its authenticity
-  from AES-256-GCM, whose tag covers the rotation metadata (=key-id=,
-  =created-at=, =expires-at=) as associated data; BWK1 and BWK2 use an
-  HMAC-SHA256 verified before decryption. Either way a token or object that was
-  edited is reported rather than silently accepted, and none of the metadata can
-  be rewritten without invalidating the seal.
+- *Authenticity is checked explicitly, by one mechanism.* Every sealed value is
+  a BWK3 envelope, and its authenticity comes from AES-256-GCM, whose tag covers
+  the rotation metadata (=key-id=, =created-at=, =expires-at=) as associated
+  data. There is no second, MAC-based path to keep correct and no older format to
+  fall back to: a token or object that was edited is reported rather than
+  silently accepted, and no field of the metadata can be rewritten without
+  invalidating the seal. The format is version-tagged so it can evolve, but only
+  one version exists today, and any other version tag is refused outright.
 - *Rotation policies are enforced, not advisory.* An envelope's =expires-at= is
   checked before decryption (unless =#:enforce-expiry? #f= / =--allow-expired=
   explicitly asks otherwise), =#:max-age-seconds= bounds how old data may be, and
@@ -1117,6 +1189,170 @@ unpredictable output across runs.
   ~signing-key~ secret and distinct. Keys are now used in-process and no longer
   travel through a command line, so they do not appear in the process list;
   they are still ordinary Guile strings, so avoid printing or logging them.
+
+----------------
+
+* Choosing and keeping keys
+
+Everything bewaking promises reduces to one sentence: *the keys are the secret.*
+The algorithms, the formats, the source code and this document are all public,
+and none of them has to be protected. A key does.
+
+** Use long, random keys
+
+The keys are ordinary strings, so nothing forces them to be strong — which is
+one of the few ways to break the scheme without breaking the code. A good key is
+at least 32 bytes from a cryptographically strong source:
+
+#+begin_src shell
+# 32 random bytes, hexadecimal: 64 hex characters, 256 bits.
+openssl rand -hex 32
+# or, without OpenSSL:
+head -c 32 /dev/urandom | base16 -w 0
+#+end_src
+
+A UUID (as used in the examples above for readability) carries about 122 bits of
+randomness and is acceptable; a word, a date, a project name, or a password you
+can remember is not. Do not stretch a weak key by hashing it or prefixing it with
+a constant — that adds no entropy. If a human-memorable secret must be the key,
+seal with ~#:kdf 'argon2id~ (64 MiB, 3 passes by default) instead of the default
+PBKDF2: the derivation is meant to slow a guessing attacker down, and PBKDF2's
+10 000 iterations are far too cheap for a passphrase (see
+[[#what-the-source-code-gives-an-attacker][What the source code gives an
+attacker]]).
+
+** Keep them secret and distinct
+
+- The ~encryption-key~ and the ~signing-key~ must be two *different* values. If
+  they are equal, the inner and outer layers share a secret, and an attacker who
+  learns one has learned both.
+- Give every environment — development, staging, production — its own pair. A
+  shared development key is a production key handed to every developer.
+- Never commit a key. Not in source, not in a test, not in a config file, not in
+  a container image, not in a screenshot of a terminal.
+- Prefer the environment (=BEWAKING_ENCRYPTION_KEY=,
+  =BEWAKING_SIGNING_KEY=) or a file (=--encryption-key-file=,
+  =--signing-key-file=) over a command-line argument: environment variables and
+  files are not copied into your shell history or shown in a process list.
+- Do not log keys, and do not log tokens either — a token is a bearer
+  credential. The exception is the envelope *header*, which ~envelope-metadata~
+  reads without any key and which carries only the key id and timestamps.
+
+** Plan for rotation, and for compromise
+
+- Give each key pair a key id and seal new data with the current one; a
+  [[#key-rotation][keyring]] lets old data keep opening without a migration.
+- A keyring entry's =not-before= / =not-after= window is how you retire a key:
+  data sealed with it stops opening, immediately.
+- If a key does leak, rotate first and investigate second: roll in a new pair,
+  retire the old entry, and let short token lifetimes bound the exposure. Keys
+  that were only ever used in-process are not in ~ps~ output, but they may be in
+  shell history if they were passed on a command line, and they are plain Guile
+  strings in memory while the process runs — there is no way to wipe them, so
+  keep the process's memory as uninteresting as its disk.
+
+----------------
+
+* What the source code gives an attacker
+
+bewaking is free software. Assume the worst case, because it is the real case:
+*the attacker has read every line of this repository.* They have the algorithms,
+the envelope layout, the constants, the garbling routine, the test suite and the
+reference vectors. They also have as many copies of any token or sealed object
+they can capture, and they can edit one as much as they like. This section states
+what that buys them — and what it does not.
+
+** What they get: a clear view of a public format
+
+- They can parse any token, and via ~envelope-metadata~ read its version, key id
+  and timestamps *without any key*. That is deliberate: those fields are what
+  rotation and log review work from, and they contain no secret.
+- They know exactly which algorithms protect the data (AES-256-CBC inside,
+  AES-256-GCM outside), how the keys are derived (PBKDF2 or Argon2id, and with
+  which parameters, because the sealed body records them), and where every byte
+  sits. None of that is a secret in a modern design — this is Kerckhoffs's
+  principle, and the alternative (security through a hidden format) would be
+  broken the moment somebody published the code.
+- They know the obfuscation step is obfuscation. So do you: it exists to leave
+  two independent encryptions between the plaintext and a reader, not to resist
+  someone with a debugger.
+
+** What they do not get: the keys, and therefore none of the values above
+
+- *No decryption.* The body is AES-256-GCM under a key derived from the signing
+  key, and the inner AES-256-CBC layer is only reached after that tag verifies.
+  Without the keys, the ciphertext and any "ungarbling" the attacker performs on
+  it stay ciphertext. There is no source-level shortcut to AES-256.
+- *No forgery.* Every attempt starts from a genuine envelope, and the tag covers
+  the ciphertext *and* the header. Flipping any digit of a real envelope,
+  relabelling its version, swapping its key id, backdating =created-at=, or
+  extending =expires-at= all make the tag fail — the suite checks each of these,
+  including an exhaustive digit-by-digit mutation of a real token. Knowing the
+  format is what makes those edits easy to *try*, and the tag is what makes each
+  of them fail.
+- *No swapping a body between headers.* The header is the cipher's associated
+  data, so a valid body moved under a different key id, version or expiry does
+  not open: the pair (header, body) is the unit that is authenticated.
+- *No oracle to lean on.* A wrong key, an edited ciphertext and edited associated
+  data are indistinguishable: all three surface as the same =GCM authentication
+  failed= message, and they raise rather than return anything. The tag is checked
+  by libgcrypt's ~gcry_cipher_checktag~ before a byte of plaintext is returned,
+  and the inner CBC layer's padding error is only reached once that tag has been
+  accepted — so the padding error is never a signal an attacker can probe, which
+  is what makes a padding-oracle attack unavailable here rather than merely
+  awkward.
+- *No code execution from decrypted data.* Payloads are parsed with ~read~, not
+  ~eval~, and Guile's ~#.~ read-eval syntax is off by default (verified in the
+  suite), so a sealed value cannot smuggle code into the process that opens it.
+- *No shell.* There is no subprocess and no command line for a key or a payload
+  to be interpolated into, so there is nothing to quote and nothing to read out
+  of ~/proc=.
+- *No shortcut through the old formats.* The earlier, MAC-authenticated
+  envelopes are refused outright, and the fixtures for them live in the suite as
+  rejection tests. There is no second verification path to weaken.
+- *No hardcoded secret to find.* The source contains no key material: the keys
+  in this document and in the test suite are labelled examples, and the suite's
+  fixtures are deliberately distinct from any real pair.
+
+** Where knowing the source does help — the honest list
+
+- *Offline guessing, if the key is weak.* The source (and the sealed body) tells
+  an attacker the exact derivation cost, so a low-entropy key — a passphrase, a
+  pattern, a reused string — can be brute-forced offline against a captured
+  token without touching your server. This is the one place source knowledge is
+  a real advantage, and the whole answer is
+  [[#choosing-and-keeping-keys][long random keys (or Argon2id for a
+  passphrase)]].
+- *A chosen key-derivation cost.* The Argon2id parameters travel inside the
+  sealed body, so a crafted body can name a deliberately expensive derivation
+  (up to the validated bound of 4 GiB of memory and four billion passes) and
+  make the *receiver* spend that much work before the tag is even checked —
+  source knowledge turns into a small denial-of-service primitive. The bound is
+  enforced *before* anything is allocated, so the worst case is capped rather
+  than unbounded, but the cap is high enough to matter. The default PBKDF2 cost
+  is fixed at 10 000 iterations, so tokens sealed with the default are not
+  affected; if your application accepts Argon2id bodies from untrusted clients,
+  keep sealing with the default, or reject tokens that arrive without a prior
+  authenticated step. The suite pins this: a payload whose recorded cost is
+  above the bound is refused with a parameter error (not by running the
+  derivation), while a cost inside the bound is derived and then fails the tag.
+- *Which key ids exist.* A refusal reports the key id it could not resolve,
+  which tells an attacker which labels a deployment configures. That is
+  information about the *schedule*, not the keys; return a uniform error to the
+  client if it matters to you.
+- *Replay.* A captured, still-valid token is a bearer credential: the source
+  cannot change that, because stateless sessions have no server-side list to
+  revoke from. Short lifetimes, key retirement and an optional denylist are the
+  mitigations, and they are matter-of-fact, not secret.
+
+** The short version
+
+An attacker with the source, the format and any number of captured tokens, but
+without the two keys, cannot read a sealed value, cannot forge one, cannot alter
+one field of one, and cannot derive a key from what they hold. That is what
+"the keys are the secret" means here, and it is what the suite pins down: the
+sealed value leaks nothing, every edit of a genuine value is refused, and the
+same plaintext never seals twice.
 
 ----------------
 
@@ -1157,14 +1393,22 @@ Current coverage includes:
 - the CLI: dispatch and exit codes, token and object round-trips through the
   command line, key-id/keyring rotation, rotation-metadata enforcement and
   =token inspect= audit output, and password commands,
-- the versioned envelope: version tagging, malformed-envelope rejection, tag and
-  MAC integrity checks, tamper rejection (body, key id, created-at, expiry, and a
+- the versioned envelope: version tagging, malformed-envelope rejection, GCM tag
+  integrity checks, tamper rejection (body, key id, created-at, expiry, and a
   body moved under another version's header), key rotation by key id, and refusal
   of unknown versions and of pre-versioning bare Base16 data,
-- read compatibility, against envelopes frozen from the earlier release rather
-  than re-sealed here: a real BWK1 and two real BWK2 envelopes open with their
-  original keys, keep their recorded key id and timestamps, still enforce their
-  expiry and their MAC, and are refused if edited,
+- *no legacy reader*, proven against envelopes frozen from the pre-BWK3 release
+  rather than re-sealed here: a real BWK1 and two real BWK2 envelopes are
+  refused with the keys that sealed them, expose no metadata, are not even
+  recognised as envelopes, and cannot be reached through the CLI — if an old
+  format reader were ever reintroduced, these fixtures fail the suite,
+- the web chapter: the documented stateless-session pattern as a regression test
+  in [[file:test/veritas/unit/web-spec.scm][web-spec.scm]] — sign-in sealing a token
+  into an HttpOnly/Secure cookie, one middleware helper admitting and refusing,
+  permission checks on the server, the payload (never a client-supplied id)
+  deciding identity, expiry refusal and cookie-clearing sign-out, sealed reset
+  links and cursors, key rotation and one-shot revocation by =not-after= window,
+  and keyless auditing of the envelope header,
 - rotation metadata: =created-at= recording, =ttl-seconds= / =expires-at=,
   keyless =envelope-metadata= auditing, expiry enforcement on open,
   =max-age-seconds=, authenticated metadata (rewriting the header breaks the tag
@@ -1172,7 +1416,13 @@ Current coverage includes:
 - AES-256-GCM and the KDFs behind the authenticated payload format: the payload
   is reproduced byte for byte against an independent implementation under both
   PBKDF2 and Argon2id, and a flipped ciphertext byte, a wrong key, altered
-  associated data or an unknown key-derivation id are all refused.
+  associated data or an unknown key-derivation id are all refused,
+- the two properties that make the source safe to publish: decrypted data is
+  parsed with ~read~ and never evaluated (a sealed value that looks like a
+  program comes back as a string, and Guile's ~#.~ is off), and the
+  attacker-chosen Argon2id cost recorded in a payload is validated against its
+  bounds before any memory is allocated or any pass is run, so a crafted body is
+  refused rather than obeyed.
 
 ----------------
 
@@ -1246,10 +1496,12 @@ O -- No --> R
 class R error;
 #+end_src
 
-A BWK1 or BWK2 envelope follows the same shape with two differences: its header
-and body are authenticated by an HMAC-SHA256 instead of a cipher tag, and its
-outer AES-CBC layer is decrypted rather than opened by GCM. Both are read for
-compatibility only; nothing seals them any more.
+There is one format and one path: an envelope is opened by decoding it,
+verifying the GCM tag (which covers the header as associated data) and
+decrypting, and any version tag other than =BWK3= stops the flow at the version
+check. Earlier releases used an HMAC over the header and body instead of a
+cipher tag; that reader no longer exists, so those strings are refused exactly
+like arbitrary text.
 
 ---------------------
 
