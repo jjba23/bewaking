@@ -334,11 +334,11 @@ reported explicitly — =integrity check failed= — instead of surfacing as a
 confusing decryption error or as silent corruption. A payload that is not a
 current-version envelope, such as an older =BWK1= envelope or a pre-versioning
 bare Base16 token, is refused with =not a BWK2 envelope= instead of being
-decrypted on a guess. Because the MAC covers the
-metadata, =key-id=, =created-at= and =expires-at= can be trusted once verified
-and *audited without any key* through ~envelope-metadata~. By default the MAC
-key is derived from the signing key with a fixed domain-separation suffix, so no
-extra key is required; pass =#:mac-key= when you want strict key separation.
+decrypted on a guess. Because the MAC covers the metadata, =key-id=,
+=created-at= and =expires-at= can be trusted once verified and *audited without
+any key* through ~envelope-metadata~. By default the MAC key is derived from the
+signing key with a fixed domain-separation suffix, so no extra key is required;
+pass =#:mac-key= when you want strict key separation.
 
 ** Rotation metadata: expiry and audit
 
