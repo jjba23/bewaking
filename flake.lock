@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "guile-uuid-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792677196,
+        "narHash": "sha256-14A4Wk11K2zX7v/aaKtwJDerA7PLQO9MPjp/wBR7kyI=",
+        "owner": "jjba23",
+        "repo": "nixpkgs",
+        "rev": "936a650fa7ca1133e527a058c0a819b3c35e2551",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jjba23",
+        "ref": "guile-uuid-init",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792502884,
+        "narHash": "sha256-IoNisKcGbUjdd45qCqywGMCYmZ5EnkxezvLII0FWwNA=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "02c087f3fe673c9e317f206a627cb6b910336dbe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "guile-uuid-src": "guile-uuid-src",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
