@@ -98,3 +98,17 @@
 (define (default)
   "Default task to be run, list available tasks."
   ($ '("maak --list")))
+
+;; ====== Container tasks ======
+
+(define (container-build)
+  "Build the container image for bewaking."
+  ($ '("podman build -t bewaking .")))
+
+(define (container-run)
+  "Run the container image for bewaking."
+  ($ '("podman run --rm -it bewaking:latest")))
+
+(define (package-docker)
+  "Build the container image for bewaking."
+  (container-build))

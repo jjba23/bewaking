@@ -1,0 +1,34 @@
+Source: bewaking
+Section: lisp
+Priority: optional
+Maintainer: Josep Bigorra <jjbigorra@gmail.com>
+# NOTE: guile-uuid is not packaged in Debian yet.  It is listed because this
+# package cannot be loaded without it; package it first.
+Build-Depends:
+ debhelper-compat (= 13),
+ guile-3.0,
+ guile-3.0-dev,
+ pkg-config,
+ guile-gcrypt,
+ guile-uuid
+Standards-Version: 4.6.2
+Homepage: https://codeberg.org/jjba23/bewaking
+Vcs-Git: https://codeberg.org/jjba23/bewaking.git
+Vcs-Browser: https://codeberg.org/jjba23/bewaking
+Rules-Requires-Root: no
+
+Package: bewaking
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ guile-3.0,
+ guile-gcrypt,
+ guile-uuid,
+ bash,
+ coreutils
+Description: Authentication and authorization library for Guile Scheme
+ Bewaking double-encrypts and decrypts data with a custom obfuscation step,
+ and provides a DSL for authorization, authentication and token generation, a
+ simple user permission system and a password-strength module, all usable
+ from Guile Scheme.

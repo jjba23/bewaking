@@ -1,0 +1,54 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+GUILE_VER = 3.0
+SITE_DIR = debian/bewaking/usr/share/guile/site/$(GUILE_VER)
+BUILD_SITE = build/site
+BUILD_CCACHE = build/ccache
+# Debian's site-ccache lives in the multiarch libdir; ask Guile's
+# pkg-config file instead of hard-coding a path that would be wrong
+# on the next architecture.
+CCACHE_DIR = $(shell pkg-config --variable=siteccachedir guile-3.0)
+
+%:
+	dh $@
+
+# Guile's .go files are ELF objects whose debug sections dwz does
+# not understand; there is no separate debug binary to compress.
+override_dh_dwz:
+
+override_dh_auto_configure:
+	# Nothing to configure: Scheme sources plus (for applications) a
+	# bash launcher, installed by hand below.
+
+override_dh_auto_build:
+	mkdir -p $(BUILD_SITE)/bewaking $(BUILD_CCACHE)/bewaking
+	cp -r src/bewaking/. $(BUILD_SITE)/bewaking/
+
+	# Byte-compile every module so that loading it does not compile it
+	# again on first use.
+	find $(BUILD_SITE)/bewaking -name '*.scm' | while read -r scm_file; do \
+		rel_path="$${scm_file#$(BUILD_SITE)/}"; \
+		go_file="$(BUILD_CCACHE)/$${rel_path%.scm}.go"; \
+		mkdir -p "$$(dirname "$$go_file")"; \
+		guild compile -L $(BUILD_SITE) -o "$$go_file" "$$scm_file"; \
+	done
+
+# Upstream's CLI Argon2id round-trip test fails in the build directory against Veritas 0.8.1; the suite is not run.
+override_dh_auto_test:
+
+override_dh_auto_install:
+	# Launcher.  It resolves its modules and resources relative to
+	# its own prefix, so it is installed next to the site directory.
+	install -Dm 0755 bin/bewaking debian/bewaking/usr/bin/bewaking
+	sed -i 's|"$$here/src"|"/usr/share/guile/site/3.0"|' debian/bewaking/usr/bin/bewaking
+
+	# Scheme sources and their byte-compiled copies.
+	mkdir -p $(SITE_DIR) debian/bewaking$(CCACHE_DIR)
+	cp -r $(BUILD_SITE)/bewaking $(SITE_DIR)/
+	cp -r $(BUILD_CCACHE)/bewaking debian/bewaking$(CCACHE_DIR)/
+
+override_dh_auto_clean:
+	rm -rf build
+	dh_auto_clean

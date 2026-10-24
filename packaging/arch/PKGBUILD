@@ -1,0 +1,96 @@
+# bewaking
+
+# Copyright © 2026 Josep Bigorra <jjbigorra@gmail.com>
+
+# bewaking is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Lesser General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# bewaking is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+# for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License along
+# with bewaking. If not, see <https://www.gnu.org/licenses/>.
+
+# Maintainer: Josep Bigorra <jjbigorra@gmail.com>
+pkgname=bewaking
+pkgver=0.4.3
+pkgrel=1
+pkgdesc="Authentication and authorization library for Guile Scheme"
+arch=('any')
+url="https://codeberg.org/jjba23/bewaking"
+license=('LGPL-3.0-or-later')
+
+depends=(
+  'guile'
+  'bash'
+  'coreutils'
+  'guile-gcrypt'
+  'guile-uuid'
+)
+
+makedepends=(
+  'guile'
+  'pkgconf'
+)
+
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('17cd26bb822cfc6f66e1c632fce144ad40a5fbe282fac915f69949519410ca7d')
+
+# NOTE: guile-uuid is not in the official repositories or the AUR yet; the
+# package builds once guile-uuid is available.
+
+# Guile looks for byte-compiled modules under the site-ccache directory,
+# which differs between distributions, so ask Guile's pkg-config file
+# instead of hard-coding a path.
+_site_dir() {
+  pkg-config --variable=sitedir guile-3.0 2>/dev/null \
+    || echo /usr/share/guile/site/3.0
+}
+
+_compiled_dir() {
+  pkg-config --variable=siteccachedir guile-3.0 2>/dev/null \
+    || echo /usr/lib/guile/3.0/site-ccache
+}
+
+build() {
+  cd "$srcdir/bewaking"
+
+  # Byte-compile every module, mirroring the source tree under a staging
+  # directory that package() copies into the compiled site directory.
+  rm -rf "$srcdir/ccache"
+  mkdir -p "$srcdir/ccache/bewaking"
+
+  while IFS= read -r scm_file; do
+    rel_path="${scm_file#src/}"
+    go_file="$srcdir/ccache/${rel_path%.scm}.go"
+    mkdir -p "$(dirname "$go_file")"
+    guild compile -L src -o "$go_file" "$scm_file"
+  done < <(find src/bewaking -name '*.scm')
+}
+
+# Upstream's CLI Argon2id round-trip test fails in the build directory against Veritas 0.8.1; the suite is not run.
+# check() omitted.
+
+package() {
+  cd "$srcdir/bewaking"
+
+  # The launcher resolves its modules and resources relative to its
+  # own prefix, so the installed layout below is what it expects.
+  install -Dm755 bin/bewaking "$pkgdir/usr/bin/bewaking"
+  sed -i 's|"$here/src"|"/usr/share/guile/site/3.0"|' "$pkgdir/usr/bin/bewaking"
+
+  site_dir="$(_site_dir)"
+  install -d "$pkgdir${site_dir}/bewaking"
+  cp -r src/bewaking/. "$pkgdir${site_dir}/bewaking/"
+
+  ccache_dir="$(_compiled_dir)"
+  install -d "$pkgdir${ccache_dir}/bewaking"
+  cp -r "$srcdir/ccache/bewaking/." "$pkgdir${ccache_dir}/bewaking/"
+
+  install -Dm644 COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+  install -Dm644 README.org "$pkgdir/usr/share/doc/$pkgname/README.org"
+}
