@@ -31,7 +31,7 @@
 
 stdenv.mkDerivation {
   pname = "guile-bewaking";
-  version = "0.4.5";
+  version = "0.4.6";
 
   src = ./.;
 

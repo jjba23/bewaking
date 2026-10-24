@@ -63,7 +63,7 @@
 
 (define (compile)
   "Compile all project source code."
-  (time-machine-manifest-shell (list "guild compile -L ./src" "-W3"
+  (time-machine-manifest-shell (list "guild" "compile" "-L" "./src" "-W3"
                                      "./src/**/*.scm")
                                #:verbose? #t))
 
@@ -75,8 +75,8 @@
 
 (define (repl)
   "Development REPL."
-  (time-machine-manifest-shell (list "guile -L ./src"
-                                     "-c '((@ (ares server) run-nrepl-server))'")
+  (time-machine-manifest-shell (list "guile" "-L" "./src"
+                                     "-c" "'((@ (ares server) run-nrepl-server))'")
                                #:verbose? #t))
 
 (define (docs)
@@ -106,17 +106,17 @@ being swallowed by the chain."
 
 (define (test)
   "Run the project's tests."
-  (time-machine-manifest-shell (list "guile -L ./src -L ./test"
-                                     "-c '((@ (veritas runner) run-tests))'")
+  (time-machine-manifest-shell (list "guile" "-L" "./src" "-L" "./test"
+                                     "-c" "'((@ (veritas runner) run-tests))'")
                                #:verbose? #t))
 
 (define (hot-reload)
   "Watch the sources and rerun the tests on every change."
   (time-machine-manifest-shell
-   (list "watchexec 'maak test'"
+   (list "watchexec" "'maak test'"
          "--clear"
-         (~ "--exts ~a" (string-join (map symbol->string hot-reload-file-types)
-                                     ","))
+         "--exts" (string-join (map symbol->string hot-reload-file-types)
+                               ",")
          "--on-busy-update=restart"
          "--shell" "bash"
          "--watch" ".")
