@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64"
+     role="img" aria-label="Bewaking — Encryption, authentication and authorization toolkit for Guile">
+ <title>Bewaking — Encryption, authentication and authorization toolkit for Guile</title>
+ <defs><linearGradient id="bewaking-main" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#5454d1"/><stop offset=".55" stop-color="#3434c8"/><stop offset="1" stop-color="#262694"/></linearGradient><linearGradient id="bewaking-light" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#7979db"/><stop offset=".55" stop-color="#5454d1"/><stop offset="1" stop-color="#3434c8"/></linearGradient><linearGradient id="bewaking-pale" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#b2b2ea"/><stop offset=".55" stop-color="#9595e2"/><stop offset="1" stop-color="#7575da"/></linearGradient><linearGradient id="bewaking-dark" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3434c8"/><stop offset=".55" stop-color="#2d2dac"/><stop offset="1" stop-color="#262694"/></linearGradient><linearGradient id="bewaking-deep" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#2c2ca8"/><stop offset=".55" stop-color="#24248c"/><stop offset="1" stop-color="#1f1f78"/></linearGradient><linearGradient id="bewaking-gloss" x1="0" y1="0" x2="0" y2="36" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff" stop-opacity=".3"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient><linearGradient id="bewaking-shade" x1="20" y1="20" x2="64" y2="64" gradientUnits="userSpaceOnUse"><stop offset=".3" stop-color="#000000" stop-opacity="0"/><stop offset="1" stop-color="#000000" stop-opacity=".22"/></linearGradient><clipPath id="bewaking-clip"><path d="M32 3 56 12v18c0 15.6-10.4 25.8-24 31C18.4 55.8 8 45.6 8 30V12z"/></clipPath></defs>
+ <g clip-path="url(#bewaking-clip)">
+  <path d="M32 3 56 12v18c0 15.6-10.4 25.8-24 31C18.4 55.8 8 45.6 8 30V12z" fill="url(#bewaking-main)"/>
+  <rect x="0" y="0" width="64" height="64" fill="url(#bewaking-gloss)"/>
+  <rect x="0" y="0" width="64" height="64" fill="url(#bewaking-shade)"/>
+  <path d="M32 3 56 12v18c0 15.6-10.4 25.8-24 31C18.4 55.8 8 45.6 8 30V12z" fill="none" stroke="#ffffff" stroke-opacity=".26" stroke-width="1.6"/>
+ </g>
+ <path d="M32 3 56 12v18c0 15.6-10.4 25.8-24 31C18.4 55.8 8 45.6 8 30V12z" fill="none" stroke="#000000" stroke-opacity=".16" stroke-width="1"/>
+ <g><path d="M32 8 51 15v15c0 12.6-8.2 21-19 25.4" fill="none" stroke="#fbfbfb" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.35"/><circle cx="32" cy="28" r="6" fill="#fbfbfb"/><path d="M29.4 32h5.2l1.6 10h-8.4z" fill="#fbfbfb"/></g>
+</svg>
