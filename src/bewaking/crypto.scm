@@ -91,6 +91,33 @@
                            (lambda (key . args) #f))))
     (and function (pointer->procedure return-type function argument-types))))
 
+;; libgcrypt writes the handle it opens through a pointer to a `void *'. That
+;; cell has to keep its address and its contents for as long as the handle is
+;; open. Garbage-collected storage cannot promise that: once a cell is
+;; reclaimed, the next call can allocate the same bytes, write its own handle
+;; there, and then two open handles share one context. One of them closes the
+;; other's handle, and libgcrypt reports either an unknown algorithm or a
+;; closed handle. The cell therefore comes from malloc and is released with
+;; free after the handle is closed.
+(define libc
+  (dynamic-link))
+
+(define (libc-procedure return-type name argument-types)
+  "Return the C library function @var{name} as a Scheme procedure taking
+   @var{argument-types} and returning @var{return-type}."
+  (pointer->procedure return-type (dynamic-func name libc) argument-types))
+
+(define allocate-handle-cell
+  (libc-procedure '* "malloc" (list size_t)))
+
+(define release-handle-cell
+  (libc-procedure void "free" (list '*)))
+
+(define (take-handle-cell)
+  "Return a pointer-sized cell libgcrypt can write a handle into. Release the
+   cell with `release-handle-cell' once the handle it holds is closed."
+  (allocate-handle-cell (sizeof '*)))
+
 ;; Algorithm and mode identifiers from <gcrypt.h>.
 (define gcry-cipher-aes256 9)
 (define gcry-cipher-mode-cbc 3)
@@ -175,7 +202,7 @@
   (libgcrypt-procedure-or-#f int "gcry_kdf_final" (list '* size_t '*)))
 
 (define gcry-kdf-close
-  (libgcrypt-procedure-or-#f int "gcry_kdf_close" (list '*)))
+  (libgcrypt-procedure-or-#f void "gcry_kdf_close" (list '*)))
 
 (define gcry-strerror
   (libgcrypt-procedure '* "gcry_strerror" (list int)))
@@ -187,6 +214,53 @@
     (error (format #f "bewaking: ~a failed: ~a"
                    what
                    (pointer->string (gcry-strerror error-code))))))
+
+(define (call-with-libgcrypt-handle what open close body)
+  "Open a libgcrypt handle and call @var{body} with it.
+
+   @var{open} is called with the cell libgcrypt writes the handle into and
+   returns libgcrypt's error code; @var{what} names the call in the error
+   raised when it fails. @var{close} closes the handle, and may be #f when the
+   loaded libgcrypt lacks that function.
+
+   The handle is closed, and the cell released, exactly once: when @var{body}
+   returns, and when it raises. `dynamic-wind' is the obvious way to spell
+   that and is the wrong one here, because its winders run every time the
+   fiber is suspended and its before thunks every time it is resumed. Under
+   Fibers -- which bewaking's own test runner uses, and which any application
+   that bounds work with a timeout also ends up inside -- a suspension inside
+   @var{body} therefore closes the handle, and the rest of @var{body} goes on
+   using a freed one. That reads as a crash, or as libgcrypt reporting an
+   unknown algorithm for a handle it has already destroyed. The suspension
+   need not be @var{body}'s own doing: an interrupted async, or a timeout
+   watchdog marking the kernel thread, lands on the safe point at the end of
+   a long libgcrypt call, which is enough. A `catch' around the body has none
+   of that behaviour: it runs on the two exits that matter, and on nothing
+   else.
+
+   Abandoning a fiber mid-call is not one of those exits, so the handle and
+   its cell leak; that is the price of not being able to tell a suspension
+   from an exit, and it is bounded by one handle per abandoned call."
+  (let ((cell (take-handle-cell)))
+    (let ((error-code (open cell)))
+      (unless (zero? error-code)
+        (release-handle-cell cell)
+        (check-libgcrypt error-code what)))
+    (let ((handle (dereference-pointer cell))
+          (closed? #f))
+      (define (close!)
+        (unless closed?
+          (set! closed? #t)
+          (when close (close handle))
+          (release-handle-cell cell)))
+      (catch #t
+             (lambda ()
+               (let ((result (body handle)))
+                 (close!)
+                 result))
+             (lambda (key . args)
+               (close!)
+               (apply throw key args))))))
 
 ;; ====== Randomness ======
 
@@ -426,26 +500,23 @@
 (define (call-with-aes-256-cbc key iv proc)
   "Call @var{proc} with an AES-256-CBC cipher handle keyed by @var{key} and
    initialised with @var{iv}, always closing the handle afterwards."
-  (let* ((key-bytes key)
-         (iv-bytes iv)
-         (handle-cell (bytevector->pointer (make-bytevector (sizeof '*))))
-         (error-code (gcry-cipher-open handle-cell gcry-cipher-aes256
-                                       gcry-cipher-mode-cbc 0)))
-    (check-libgcrypt error-code "gcry_cipher_open")
-    (let ((handle (dereference-pointer handle-cell)))
-      (dynamic-wind
-        (lambda () #t)
-        (lambda ()
-          (check-libgcrypt
-           (gcry-cipher-setkey handle (bytevector->pointer key-bytes)
-                               (bytevector-length key-bytes))
-           "gcry_cipher_setkey")
-          (check-libgcrypt
-           (gcry-cipher-setiv handle (bytevector->pointer iv-bytes)
-                              (bytevector-length iv-bytes))
-           "gcry_cipher_setiv")
-          (proc handle))
-        (lambda () (gcry-cipher-close handle))))))
+  (let ((key-bytes key)
+        (iv-bytes iv))
+    (call-with-libgcrypt-handle
+     "gcry_cipher_open"
+     (lambda (cell)
+       (gcry-cipher-open cell gcry-cipher-aes256 gcry-cipher-mode-cbc 0))
+     gcry-cipher-close
+     (lambda (handle)
+       (check-libgcrypt
+        (gcry-cipher-setkey handle (bytevector->pointer key-bytes)
+                            (bytevector-length key-bytes))
+        "gcry_cipher_setkey")
+       (check-libgcrypt
+        (gcry-cipher-setiv handle (bytevector->pointer iv-bytes)
+                           (bytevector-length iv-bytes))
+        "gcry_cipher_setiv")
+       (proc handle)))))
 
 (define (aes-256-cbc-encrypt key iv plaintext)
   "Encrypt the bytevector @var{plaintext} under @var{key} (32 bytes) and
@@ -500,26 +571,23 @@
   "Call @var{proc} with an AES-256-GCM cipher handle keyed by @var{key} and
    initialised with the 12-byte @var{nonce}, always closing the handle
    afterwards."
-  (let* ((key-bytes key)
-         (nonce-bytes nonce)
-         (handle-cell (bytevector->pointer (make-bytevector (sizeof '*))))
-         (error-code (gcry-cipher-open handle-cell gcry-cipher-aes256
-                                       gcry-cipher-mode-gcm 0)))
-    (check-libgcrypt error-code "gcry_cipher_open (GCM)")
-    (let ((handle (dereference-pointer handle-cell)))
-      (dynamic-wind
-        (lambda () #t)
-        (lambda ()
-          (check-libgcrypt
-           (gcry-cipher-setkey handle (bytevector->pointer key-bytes)
-                               (bytevector-length key-bytes))
-           "gcry_cipher_setkey (GCM)")
-          (check-libgcrypt
-           (gcry-cipher-setiv handle (bytevector->pointer nonce-bytes)
-                              (bytevector-length nonce-bytes))
-           "gcry_cipher_setiv (GCM)")
-          (proc handle))
-        (lambda () (gcry-cipher-close handle))))))
+  (let ((key-bytes key)
+        (nonce-bytes nonce))
+    (call-with-libgcrypt-handle
+     "gcry_cipher_open (GCM)"
+     (lambda (cell)
+       (gcry-cipher-open cell gcry-cipher-aes256 gcry-cipher-mode-gcm 0))
+     gcry-cipher-close
+     (lambda (handle)
+       (check-libgcrypt
+        (gcry-cipher-setkey handle (bytevector->pointer key-bytes)
+                            (bytevector-length key-bytes))
+        "gcry_cipher_setkey (GCM)")
+       (check-libgcrypt
+        (gcry-cipher-setiv handle (bytevector->pointer nonce-bytes)
+                           (bytevector-length nonce-bytes))
+        "gcry_cipher_setiv (GCM)")
+       (proc handle)))))
 
 (define (gcm-authenticate! handle associated-data)
   "Feed @var{associated-data} to an open GCM @var{handle} as data that is
@@ -750,35 +818,34 @@
   (let* ((password-bytes (string->utf8 password))
          (parameters (list length iterations memory-kib parallelism))
          (param-bytes (make-bytevector (* 4 unsigned-long-bytes) 0))
-         (handle-cell (bytevector->pointer (make-bytevector (sizeof '*))))
          (out (make-bytevector length 0)))
     (do ((i 0 (+ i 1))) ((= i 4))
       (bytevector-uint-set! param-bytes (* i unsigned-long-bytes)
                             (list-ref parameters i)
                             (native-endianness) unsigned-long-bytes))
-    (check-libgcrypt
-     (gcry-kdf-open handle-cell gcry-kdf-argon2 gcry-kdf-argon2id
-                    (bytevector->pointer param-bytes) 4
-                    (bytevector->pointer password-bytes)
-                    (bytevector-length password-bytes)
-                    (bytevector->pointer salt) (bytevector-length salt)
-                    (if secret (bytevector->pointer secret) %null-pointer)
-                    (if secret (bytevector-length secret) 0)
-                    (if associated-data
-                        (bytevector->pointer associated-data)
-                        %null-pointer)
-                    (if associated-data (bytevector-length associated-data) 0))
-     "gcry_kdf_open (Argon2id)")
-    (let ((handle (dereference-pointer handle-cell)))
-      (dynamic-wind
-        (lambda () #t)
-        (lambda ()
-          (check-libgcrypt (gcry-kdf-compute handle %null-pointer)
-                           "gcry_kdf_compute (Argon2id)")
-          (check-libgcrypt (gcry-kdf-final handle length
-                                           (bytevector->pointer out))
-                           "gcry_kdf_final (Argon2id)"))
-        (lambda () (when gcry-kdf-close (gcry-kdf-close handle)))))
+    (call-with-libgcrypt-handle
+     "gcry_kdf_open (Argon2id)"
+     (lambda (cell)
+       (gcry-kdf-open cell gcry-kdf-argon2 gcry-kdf-argon2id
+                      (bytevector->pointer param-bytes) 4
+                      (bytevector->pointer password-bytes)
+                      (bytevector-length password-bytes)
+                      (bytevector->pointer salt) (bytevector-length salt)
+                      (if secret (bytevector->pointer secret) %null-pointer)
+                      (if secret (bytevector-length secret) 0)
+                      (if associated-data
+                          (bytevector->pointer associated-data)
+                          %null-pointer)
+                      (if associated-data
+                          (bytevector-length associated-data)
+                          0)))
+     gcry-kdf-close
+     (lambda (handle)
+       (check-libgcrypt (gcry-kdf-compute handle %null-pointer)
+                        "gcry_kdf_compute (Argon2id)")
+       (check-libgcrypt (gcry-kdf-final handle length
+                                        (bytevector->pointer out))
+                        "gcry_kdf_final (Argon2id)")))
     out))
 
 (define (kdf-spec kdf)
