@@ -17,7 +17,7 @@
 
 # Maintainer: Josep Bigorra <jjbigorra@gmail.com>
 pkgname=bewaking
-pkgver=0.4.3
+pkgver=0.4.7
 pkgrel=1
 pkgdesc="Authentication and authorization library for Guile Scheme"
 arch=('any')
@@ -38,7 +38,7 @@ makedepends=(
 )
 
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('6961d4c1eb807ad5cc673edaf3152f03d11ae7b5d07ed7af4ab9288b5e29e2da')
+sha256sums=('2175e96f81b172c565056c0de084267785166933d5983d25e49ba529b956e3eb')
 
 # NOTE: guile-uuid is not in the official repositories or the AUR yet; the
 # package builds once guile-uuid is available.
