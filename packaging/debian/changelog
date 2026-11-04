@@ -1,3 +1,13 @@
+bewaking (0.4.7-1) unstable; urgency=medium
+
+  * Close libgcrypt handles without `dynamic-wind', so a cipher or key
+    derivation survives a fiber suspension: this fixes a crash in the sealed
+    envelope path and an Argon2id error under Fibers.
+  * Allocate the handle cell with malloc so the collector cannot reclaim it
+    while libgcrypt writes to it.
+
+ -- Josep Bigorra <jjbigorra@gmail.com>  Sat, 24 Oct 2026 18:00:00 +0200
+
 bewaking (0.4.3-1) unstable; urgency=medium
 
   * Bump version for container and GNU/Linux packaging improvements.
