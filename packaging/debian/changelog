@@ -1,3 +1,11 @@
+bewaking (0.5.1-1) unstable; urgency=medium
+
+  * Point the home page, VCS fields and distribution sources at GitHub.
+  * Build the Arch package from the GitHub release archive.
+  * Cover the user guide under the documentation's CC-BY-4.0 license.
+
+ -- Josep Bigorra <jjbigorra@gmail.com>  Thu, 05 Nov 2026 00:00:00 +0100
+
 bewaking (0.5.0-1) unstable; urgency=medium
 
   * Relicense bewaking under the MIT license.
