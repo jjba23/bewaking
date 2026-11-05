@@ -26,7 +26,7 @@ makedepends=(
 )
 
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('2175e96f81b172c565056c0de084267785166933d5983d25e49ba529b956e3eb')
+sha256sums=('17f28450cf5207f0f86fdc697479eef007d9dcf49d7e802744e32102b9761e94')
 
 # NOTE: guile-uuid is not in the official repositories or the AUR yet; the
 # package builds once guile-uuid is available.
