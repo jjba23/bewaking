@@ -1,0 +1,27 @@
+#+title: Bewaking documentation
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:../README.org][← Project README]]
+
+Bewaking seals tokens, objects and plaintext with two independent AES-256 keys,
+in process, and ships the same operations as a library and as a command line.
+The guide is split by topic; each document links onward where a topic continues.
+
+| Document | What it covers |
+|----------+----------------|
+| [[file:installation.org][Installation and dependencies]] | Guix, Nix, container and distribution routes, the complete dependency list, and the OpenSSL wire format. |
+| [[file:tokens.org][Tokens and payloads]] | What a token is, the double-encryption and garbling pipeline, the payload fields, the token API and the flow diagrams. |
+| [[file:sealing.org][Sealed envelopes and key rotation]] | The single BWK3 format, authenticated metadata, reproducible sealing and key rotation. |
+| [[file:cli.org][Command-line interface]] | Token, object and password commands, key sources, rotation options and exit codes. |
+| [[file:primitives.org][Cryptographic primitives]] | Base16/Base64, HMAC-SHA256, PBKDF2, Argon2id, AES-CBC/GCM and OpenSSL interoperability. |
+| [[file:passwords.org][Passwords]] | Strength scoring and generation, plus Argon2id PHC storage and verification. |
+| [[file:web.org][Web applications]] | Stateless sessions, protected routes, sealed state, rotation and revocation. |
+| [[file:security.org][Security model]] | The threat model, key handling, and what publishing the source gives an attacker. |
+| [[file:development.org][Development, testing and documentation]] | Running the suite and what it covers, generating API docs, users and Guix reproducibility. |
+
+Start with [[file:installation.org][installation]] and the
+[[file:../README.org::#quick-start][quick start]] if you are new to the project,
+or go straight to [[file:tokens.org][tokens]] if you already have a checkout.

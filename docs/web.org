@@ -1,0 +1,312 @@
+#+title: Web applications
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:index.org][Documentation index]]
+
+* Permissions
+:PROPERTIES:
+:CUSTOM_ID: permissions
+:END:
+
+~has-needed-permissions?~ checks that every needed permission is present. The
+comparison is a set-subset test, so order does not matter:
+
+#+begin_src scheme
+(has-needed-permissions? #:present '(reader admin) #:needed '(admin))        ; #t
+(has-needed-permissions? #:present '(reader)       #:needed '(admin))        ; #f
+(has-needed-permissions? #:present '(reader admin) #:needed '(admin reader)); #t
+#+end_src
+
+----------------
+
+* Using bewaking in a web application
+:PROPERTIES:
+:CUSTOM_ID: using-bewaking-in-a-web-application
+:END:
+
+bewaking knows nothing about HTTP, cookies or any particular framework: it
+takes a string in and hands an alist back. The same functions therefore fit
+Artanis, Guile's own =web server=, a custom ~(web request)~ handler, or any
+other Scheme web stack. This chapter walks through the stateless-session
+pattern used in production by WikiMusic, LucidPlan and Byggsteg.
+
+The pattern is four steps:
+
+1. *Sign-in*: verify the password, then seal the user's details with
+   ~generate-token~.
+2. *Delivery*: hand the token to the client, normally in an =HttpOnly= cookie
+   for browser pages and in a header for an API.
+3. *Each later request*: read the token, ~decrypt-token~ it, check permissions
+   and lifetime, then run the handler.
+4. *Sign-out*: delete the cookie. There is no server-side session to clean up.
+
+Because the identity travels *inside* the token, an authorized handler knows who
+the caller is without a database round-trip.
+
+** Sign-in: sealing a token into a cookie
+:PROPERTIES:
+:CUSTOM_ID: sign-in-sealing-a-token-into-a-cookie
+:END:
+
+The keys are read once, at startup. Names beginning with =BEWAKING_= keep the
+application and the [[file:cli.org::#command-line-interface][command-line interface]] in agreement, so an operator can
+inspect and decrypt live sessions with the very same keys.
+
+#+begin_src scheme
+(use-modules (bewaking bewaking))
+
+(define encryption-key
+  (or (getenv "BEWAKING_ENCRYPTION_KEY")
+      (error "BEWAKING_ENCRYPTION_KEY is not set")))
+(define signing-key
+  (or (getenv "BEWAKING_SIGNING_KEY")
+      (error "BEWAKING_SIGNING_KEY is not set")))
+
+(define cookie-name "x-bewaking-session")
+
+;; Step 1: turn a verified user into a token.
+(define* (issue-token #:key id email name permissions
+                      (validity-seconds (* 7 24 3600)))
+  (generate-token #:encryption-key encryption-key
+                  #:signing-key    signing-key
+                  #:token-validity-seconds validity-seconds
+                  #:get-owner-details
+                  (lambda ()
+                    `((id . ,id)
+                      (email . ,email)
+                      (name . ,name)
+                      (permissions ,@permissions)))))
+#+end_src
+
+Whatever the thunk returns comes back out of ~decrypt-token~ renamed to
+~owner-*~: ~'id~ becomes ~owner-id~, ~'permissions~ becomes ~owner-permissions~,
+and the token's own ~token-id~, ~token-created-at~ and ~token-expires-at~ fields
+are added to the payload.
+
+Step 2 is the framework's job. In an Artanis controller it looks like this:
+
+#+begin_src scheme
+;; ... verify the password, then:
+(:cookies-set! rc 'x-bewaking-session cookie-name
+               (issue-token #:id user-id #:email email #:name name
+                            #:permissions permissions))
+(:cookies-setattr! rc 'x-bewaking-session
+                   #:expires (* 7 24 3600)   ; keep in step with the token
+                   #:path "/"
+                   #:secure #t
+                   #:http-only #t)
+(redirect-to rc (string->uri "/dashboard") #:status 302)
+#+end_src
+
+=#:secure= keeps the cookie off plain HTTP, =#:http-only= puts it out of reach
+of JavaScript, and =#:path "/"= makes it apply to the whole site. The cookie's
+lifetime should match =#:token-validity-seconds=: a cookie that outlives its
+token only annoys users with "half-logged-in" states.
+
+** Protecting a route
+:PROPERTIES:
+:CUSTOM_ID: protecting-a-route
+:END:
+
+One helper serves the whole application. It answers a single question, "who is
+this, and are they allowed?", and returns the decrypted payload or =#f=:
+
+#+begin_src scheme
+;; The token is absent, truncated, tampered with, sealed by an unknown key,
+;; expired, or lacks a needed permission: in every case we get #f.
+(define* (authorized-payload #:key token (needed '()))
+  (let ((payload (and (string? token)
+                      (not (string-null? token))
+                      (decrypt-token #:token token
+                                     #:encryption-key encryption-key
+                                     #:signing-key    signing-key))))
+    (and payload
+         (token-valid? #:token payload)
+         (has-needed-permissions? #:needed needed
+                                  #:present (assoc-ref payload
+                                                       'owner-permissions))
+         payload)))
+#+end_src
+
+Two details are worth stating. ~decrypt-token~ catches everything and returns
+=#f=, so test that result *before* touching the payload; ~assoc-ref~ on =#f=
+raises. And ~token-valid?~ wants the *decrypted payload*, not the token string.
+
+A browser route reads the cookie and falls back to the login page:
+
+#+begin_src scheme
+(post "/artists/edit"
+      #:cookies '(names x-bewaking-session)
+      (lambda (rc)
+        (let ((who (authorized-payload #:token (:cookies-value rc cookie-name)
+                                       #:needed '(artist:edit))))
+          (if who
+              (edit-artist rc #:owner-id (assoc-ref who 'owner-id))
+              (redirect-to rc (string->uri "/login") #:status 302)))))
+#+end_src
+
+One Artanis quirk is worth knowing: the route's =#:cookies '(names …)= and
+~:cookies-set!~ / ~:cookies-setattr!~ use the cookie's *symbol*, while
+~:cookies-value~ looks it up by *string*, hence ~cookie-name~ above.
+
+An API route takes the token from a header instead and answers with a status
+code, which suits clients that have no cookie jar:
+
+#+begin_src scheme
+(get "/api/v1/songs"
+     (lambda (rc)
+       ;; Artanis spells a header name as a symbol: (get-header rc 'x-bewaking-token)
+       (let ((who (authorized-payload #:token (get-header rc 'x-bewaking-token)
+                                      #:needed '(songs:read))))
+         (if who
+             (songs-as-json rc)
+             (response-emit '((error . "authentication required"))
+                            #:status 401)))))
+#+end_src
+
+Such a client signs in with the very same ~issue-token~ and receives the token
+in a response header, rather than a cookie:
+
+#+begin_src scheme
+(post "/api/v1/login"
+      (lambda (rc)
+        (if (valid-credentials? rc)
+            (response-emit "" #:status 204
+                           #:headers `((x-bewaking-token
+                                        unquote (issue-token ...))))
+            (response-emit '((error . "invalid credentials")) #:status 401))))
+#+end_src
+
+Inside a handler the payload is an ordinary alist:
+
+#+begin_src scheme
+(assoc-ref who 'owner-id)          ; "144959d3-7a8e-455e-b608-31e35145a2fa"
+(assoc-ref who 'owner-email)       ; "joe@example.com"
+(assoc-ref who 'owner-name)        ; "Joe"
+(assoc-ref who 'owner-permissions) ; (read-only manage-profile)
+#+end_src
+
+Decrypt once per request and pass the payload along, instead of calling
+~decrypt-token~ again in every controller: the answer cannot change, and the
+decryption is the expensive part.
+
+Only two things are asked of a framework: read a cookie or a header, and set one.
+Anything offering those two operations can use the helper above unchanged.
+WikiMusic's
+[[https://codeberg.org/jjba23/wikimusic/src/branch/main/lib/wikimusic/auth.scm][~bewaking-endpoint~]]
+is one rendering of it, wrapped to take ~#:happy-flow~ / ~#:unhappy-flow~ thunks.
+
+** Sealed objects: stateless state that must not be tampered with
+:PROPERTIES:
+:CUSTOM_ID: sealed-objects-stateless-state-that-must-not-be-tampered-with
+:END:
+
+Not everything is a session. A ~decrypt-object~ round-trip is the right tool for
+short-lived state the server would otherwise have to store:
+
+#+begin_src scheme
+;; A "reset your password" link that expires in an hour, with no table row.
+(define link
+  (encrypt-object #:payload `((user . ,user-id) (action . reset-password))
+                  #:encryption-key encryption-key
+                  #:signing-key    signing-key
+                  #:ttl-seconds 3600))
+
+;; http://example.org/reset?token=<link>
+;; A sealed token is Base16, dots and dashes, so it needs no escaping.
+(decrypt-object #:object (assoc-ref query "token")
+                #:encryption-key encryption-key
+                #:signing-key    signing-key)
+;; => ((user . "144959d3-...") (action . reset-password))
+;; #f once the hour is over, or if the token was edited in the mail client.
+#+end_src
+
+The same pattern covers multi-step forms (seal the half-finished state into a
+hidden field instead of a session record), pagination or search cursors, and
+"remember my filter" preferences. Because the data is both encrypted and
+authenticated, clients can neither read it nor change it, while the server stays
+free of per-user state. ~encrypt-object~ takes =#:key-id= and =#:keyring=,
+exactly like tokens.
+
+** Keys, rotation and revocation
+:PROPERTIES:
+:CUSTOM_ID: keys-rotation-and-revocation
+:END:
+
+Keep both keys secret, keep them different from each other, and give every
+environment (development, staging, production) its own pair.
+
+Rotation needs no downtime and no forced logout. Add the new pair under a fresh
+key id, start sealing with it, and keep the old entry in the keyring until the
+longest-lived token sealed with it has expired:
+
+#+begin_src scheme
+(define keyring
+  '(("2026a" (encryption-key . "e1") (signing-key . "s1"))
+    ("2025b" (encryption-key . "e0") (signing-key . "s0"))))
+
+;; New logins are sealed with the current key ...
+(generate-token #:keyring keyring #:key-id "2026a"
+                #:get-owner-details get-owner-details)
+
+;; ... and old tokens still open, because the envelope names the key that
+;; sealed it. Nothing to migrate, nobody to log out.
+(decrypt-token #:token old-token #:keyring keyring)
+#+end_src
+
+Revocation is the one thing a stateless session cannot do by itself. Deleting
+the cookie signs the user out of *that* browser, but a token copied beforehand
+stays valid until it expires. Three ways to limit the damage, in increasing
+order of cost:
+
+- keep ~token-validity-seconds~ short for anything valuable, so the window is
+  small;
+- [[file:sealing.org::#enforcing-a-rotation-schedule][retire a key]] with a =not-after= window (keyring selection by =#:key-id=, or
+  =--keyring FILE= on the command line). Every session sealed with that key id
+  stops opening at once, the fastest "log everyone out now" switch;
+- store what you care about: a payload carries its own ~token-id= (a UUID), so a
+  small denylist or "sessions" table can be consulted for high-value actions
+  without turning every request into a database read.
+
+For auditing, keep the old keyring entry reachable and log the envelope header
+of incoming tokens. ~envelope-metadata~ reads the version, key id and timestamps
+with *no keys at all*, so the result is safe to log:
+
+#+begin_src scheme
+(envelope-metadata #:sealed token)
+;; => ((version . "BWK3") (key-id . "2026a") (created-at . 1791709670)
+;;     (expires-at . 1792314470)) ; #f when no #:ttl-seconds was recorded
+
+(envelope-expired? #:sealed token) ; => #f
+#+end_src
+
+From the shell, ~./bin/bewaking token inspect --token "$TOKEN"~ prints the same
+fields, so an operator can look at a suspicious cookie without holding any key.
+
+** Checklist
+:PROPERTIES:
+:CUSTOM_ID: checklist
+:END:
+
+- Set =HttpOnly= and =Secure= on the session cookie, and =SameSite= if your
+  framework exposes it; bewaking has no opinion on cookie policy.
+- Align the cookie's lifetime with =#:token-validity-seconds=.
+- Do not log tokens or keys. A token is a bearer credential: whoever holds one
+  is the user, as far as the server is concerned.
+- Keep session tokens out of URLs and =Referer= chains. A sealed *link* is the
+  deliberate exception, because there the token is the point.
+- Never trust a client-supplied user id that arrives next to a token. The
+  payload is the identity; everything else in the request is a hint.
+- Check permissions on the server on every request rather than building the
+  permission list into a page and relying on hidden buttons.
+
+Because a request is only "string in, value out", protected routes are easy to
+test without a browser: mint a token with ~generate-token~ in the test, pass it
+to the helper, and assert the payload. The project's own
+[[file:../test/veritas/unit/cli-spec.scm][cli-spec.scm]] exercises the same
+round-trips through the command line.
+
+----------------

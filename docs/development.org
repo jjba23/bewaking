@@ -1,0 +1,137 @@
+#+title: Development, testing and documentation
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:index.org][Documentation index]]
+
+* Testing
+:PROPERTIES:
+:CUSTOM_ID: testing
+:END:
+
+Tests live under [[file:../test/veritas/unit/][test/veritas/unit]] and use
+[[https://codeberg.org/jjba23/guile-veritas][guile-veritas]].
+
+Run the whole suite through the project task runner:
+
+#+begin_src shell
+maak test
+#+end_src
+
+Or directly, if you are already inside a shell with the dependencies on the
+load path:
+
+#+begin_src shell
+guile -L ./src -L ./test -c '((@ (veritas runner) run-tests))'
+#+end_src
+
+Current coverage includes:
+
+- token generation and lossless encode/decode round-trips,
+- graceful failure with wrong keys and malformed tokens,
+- ~is-token-expired?~ across past, future and malformed expiry values,
+- ~token-remaining-seconds~ and ~token-valid?~,
+- garbling/ungarbling reversibility, including random strings,
+- the payload primitives: a deterministic ~encrypt-payload~ under a supplied
+  salt, refusal of a wrong key, ~unsafe-generate-token~ raising on incomplete
+  details, and ~token-payload-valid?~ on valid and broken payloads,
+- permission subset checks,
+- generic ~encrypt-object~ / ~decrypt-object~ round-trips for alists, strings,
+  numbers and lists,
+- password character-class detection, entropy, scoring, the score labels,
+  feedback, the ~strong-password?~ predicate and the password generator,
+- the native primitives, against published reference values rather than against
+  the implementation itself: RFC 4231 HMAC-SHA256 test cases, PBKDF2-HMAC-SHA256
+  password/salt vectors, and AES-256-CBC vectors produced by OpenSSL 3.5 and
+  checked in both directions, plus malformed-input rejection for every format,
+- the CLI: dispatch and exit codes, token and object round-trips through the
+  command line, key-id/keyring rotation, rotation-metadata enforcement and
+  =token inspect= audit output, and password commands,
+- the CLI surface beyond the round-trips: ~--help~, ~--kdf-parallelism~ and the
+  =BEWAKING_*= environment key fallbacks,
+- the versioned envelope: version tagging, malformed-envelope rejection, GCM tag
+  integrity checks, tamper rejection (body, key id, created-at, expiry, and a
+  body moved under another version's header), key rotation by key id, and refusal
+  of unknown versions,
+- the web chapter: the documented stateless-session pattern as a regression test
+  in [[file:../test/veritas/unit/web-spec.scm][web-spec.scm]]: sign-in sealing a token
+  into an HttpOnly/Secure cookie, one middleware helper admitting and refusing,
+  permission checks on the server, the payload (never a client-supplied id)
+  deciding identity, expiry refusal and cookie-clearing sign-out, sealed reset
+  links and cursors, key rotation and one-shot revocation by =not-after= window,
+  and keyless auditing of the envelope header,
+- rotation metadata: =created-at= recording, =ttl-seconds= / =expires-at=,
+  keyless =envelope-metadata= auditing, expiry enforcement on open,
+  =max-age-seconds=, authenticated metadata (rewriting the header breaks the
+  tag), and keyring =not-before= / =not-after= windows,
+- AES-256-GCM and the KDFs behind the authenticated payload format: the payload
+  is reproduced byte for byte against an independent implementation under both
+  PBKDF2 and Argon2id, and a flipped ciphertext byte, a wrong key, altered
+  associated data or an unknown key-derivation id are all refused,
+- the properties that make the source safe to publish: decrypted data is parsed
+  with ~read~ and never evaluated (a sealed value that looks like a program
+  comes back as a string, and Guile's ~#.~ is off), the attacker-chosen Argon2id
+  cost recorded in a payload is validated against its bounds before any memory
+  is allocated or any pass is run, so a crafted body is refused rather than
+  obeyed, and a refusal never enumerates the keyring: an unknown key id, a
+  missing entry, a retired key, a key that is not active yet, a wrong key and an
+  altered body all produce the identical message at the library and at the
+  command line, with the identical exit code, and the message names neither the
+  key id nor any key material.
+
+----------------
+
+* Documentation
+:PROPERTIES:
+:CUSTOM_ID: documentation
+:END:
+
+The user guide is split across [[file:index.org][docs/]], one document per topic, with
+=README.org= as the landing page and every document linked from the index.
+The generated API reference is separate from it and describes each exported
+binding.
+
+Generate the technical API documentation (requires ~guile-documenta~ and
+~texinfo~):
+
+#+begin_src shell
+maak docs
+#+end_src
+
+The generated HTML is written to =doc/api-dist= and includes every exported
+binding from both ~(bewaking bewaking)~ and ~(bewaking password)~.
+
+----------------
+
+* Projects that use Bewaking
+:PROPERTIES:
+:CUSTOM_ID: projects-that-use-bewaking
+:END:
+
+- WikiMusic (Musical CMS and platform) :: https://codeberg.org/jjba23/wikimusic
+- LucidPlan (Project Management) :: https://codeberg.org/jjba23/lucidplan
+- Byggsteg (CI/CD orchestrator) :: https://codeberg.org/jjba23/byggsteg
+- Byggsteg CI/CD Woodpecker Integration :: https://codeberg.org/jjba23/byggsteg-woodpecker
+
+------------------------
+
+* On Reproducibility: Why GNU Guix?
+:PROPERTIES:
+:CUSTOM_ID: on-reproducibility-why-gnu-guix
+:END:
+
+A build should never fail because "it worked on my machine." Reliable software development requires explicit, bit-for-bit reproducibility and a functional approach to package management and system deployment.
+
+#+BEGIN_EXPORT html
+<a href="https://guix.gnu.org/">
+  <img src="https://jointhefreeworld.org/ggg/dist/gnu-guix.svg" alt="GNU Guix logo" style="max-width: 250px; width: 100%; height: auto;" />
+</a>
+#+END_EXPORT
+
+- *Declarative Build Graphs:* Packages are pure functions of their inputs with no implicit system state.
+- *Programmable with Guile:* Full system and package configurations written in [[https://www.gnu.org/software/guile/][Guile Scheme]] rather than rigid DSLs or static files.
+- *Time Travel:* Rebuild the exact system state from any point in git history using ~guix time-machine~.
+- *Atomic Operations:* Instantly upgrade or roll back environments without leaving orphaned dependencies or broken states.
+- *Unified Tooling:* One tool manages development shells, isolated containers, package builds, and full system configurations.

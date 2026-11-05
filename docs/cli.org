@@ -1,0 +1,184 @@
+#+title: Command-line interface
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:index.org][Documentation index]]
+
+* Command-line interface
+:PROPERTIES:
+:CUSTOM_ID: command-line-interface
+:END:
+
+The repository ships a small CLI, [[file:../bin/bewaking][bin/bewaking]], so tokens, sealed
+objects and passwords can be produced and opened straight from the shell. It is
+a thin wrapper around the same modules, so anything the library can do is
+available here too.
+
+The CLI must run with the project's dependencies on the load path, either from
+inside a Guix development shell (see [[file:installation.org::#installation][Installation]]) or with =src= on
+~GUILE_LOAD_PATH=:
+
+#+begin_src shell
+./bin/bewaking help
+#+end_src
+
+** Tokens
+:PROPERTIES:
+:CUSTOM_ID: tokens
+:END:
+
+#+begin_src shell
+export K1="952e0690-6c3b-4828-b191-961bf98d055c"   # encryption key
+export K2="503f5869-0a3c-4460-971f-5a88662de3fc"   # signing key
+
+# Create a token.
+TOKEN=$(./bin/bewaking token generate \
+  --owner-id owner-1 --owner-name Joe --owner-email joe@example.com \
+  --permissions read,write --validity-seconds 3600 \
+  --encryption-key "$K1" --signing-key "$K2")
+
+# Read it back.
+./bin/bewaking token decrypt --token "$TOKEN" \
+  --encryption-key "$K1" --signing-key "$K2"
+#+end_src
+
+So that keys never appear in the process list, pass them from files, or export
+the environment variables the CLI falls back to. Precedence is: explicit
+option, then file, then environment variable. A =--keyring FILE= takes
+precedence over both when given.
+
+#+begin_src shell
+export BEWAKING_ENCRYPTION_KEY="$K1"
+export BEWAKING_SIGNING_KEY="$K2"
+
+# The next commands pick the keys up automatically.
+./bin/bewaking token decrypt --token "$TOKEN"
+./bin/bewaking token decrypt --token "$TOKEN" \
+  --encryption-key-file ./k1.txt --signing-key-file ./k2.txt
+#+end_src
+
+Sealing commands accept =--key-id LABEL= to tag the envelope for
+[[file:sealing.org::#key-rotation][key rotation]], and =--keyring FILE= to select keys from an
+alist of key id to key entry. Entries may carry =not-before= / =not-after=
+validity windows so a rotation schedule is enforced:
+
+#+begin_src shell
+# ./keyring.scm
+# (("2026a" (encryption-key . "e1") (signing-key . "s1"))
+#  ("2025b" (encryption-key . "e0") (signing-key . "s0")
+#           (not-after . 1790000000)))
+
+TOKEN=$(./bin/bewaking token generate --owner-id o1 --keyring ./keyring.scm \
+  --key-id 2026a)
+./bin/bewaking token decrypt --token "$TOKEN" --keyring ./keyring.scm
+#+end_src
+
+** Rotation metadata and audit
+:PROPERTIES:
+:CUSTOM_ID: rotation-metadata-and-audit
+:END:
+
+Sealing commands can record an expiry, and every envelope's header can be read
+back without any key:
+
+#+begin_src shell
+# Seal data that is only valid for an hour.
+TOKEN=$(./bin/bewaking token generate --owner-id o1 \
+  --encryption-key "$K1" --signing-key "$K2" --ttl-seconds 3600)
+
+# Audit the header with no keys at all.
+./bin/bewaking token inspect --token "$TOKEN"
+# version:    BWK3
+# key-id:     default
+# created-at: 1791709670
+# expires-at: 1791713270
+# expired:    no
+
+# Expired data is refused. Expiry is the one refusal that is stated in full,
+# because it can only be reached once the envelope has proved genuine ...
+./bin/bewaking token decrypt --token "$TOKEN" --encryption-key "$K1" \
+  --signing-key "$K2"
+# bewaking: failed to decrypt token (open-envelope: the sealed data expired at
+#   1791713270 (key 'default').)
+
+# ... unless you explicitly ask for it (recovery and audit only).
+./bin/bewaking token decrypt --token "$TOKEN" --allow-expired \
+  --encryption-key "$K1" --signing-key "$K2"
+
+# A token whose key id you do not hold, or whose body was altered, is refused
+# without saying which: one message covers every "could not open this" cause, so
+# a refusal cannot be used to list the key ids a deployment configures.
+./bin/bewaking token decrypt --token "$SOMEONE_ELSES_TOKEN" \
+  --keyring ./keyring.scm
+# bewaking: failed to decrypt token (bewaking: the sealed data could not be
+#   opened: unknown, retired or wrong key, or the data was altered.)
+
+# Or refuse anything sealed longer ago than a day.
+./bin/bewaking object decrypt --input ./sealed.scm --max-age-seconds 86400 \
+  --encryption-key "$K1" --signing-key "$K2"
+#+end_src
+
+The same =--ttl-seconds=, =--expires-at=, =--max-age-seconds= and
+=--allow-expired= options work for =token generate=, =token decrypt=,
+=object encrypt= and =object decrypt=. A failure exits with status 1. Expired
+data is told apart and explained; every other refusal (an unknown key id, a
+retired key, a wrong key, an altered body) is one message that names no key id
+and no key material, so the CLI cannot be used to enumerate a keyring. See
+[[file:sealing.org::#a-refusal-does-not-enumerate-the-keyring][A refusal does not enumerate
+ the keyring]].
+
+** Sealed objects
+:PROPERTIES:
+:CUSTOM_ID: sealed-objects
+:END:
+
+Object commands read a Scheme datum with ~read~ from =--input FILE= or from
+standard input, and print the result on standard output:
+
+#+begin_src shell
+SEALED=$(echo '((name . Joe) (score . 7))' \
+  | ./bin/bewaking object encrypt \
+      --encryption-key "$K1" --signing-key "$K2")
+
+printf '%s' "$SEALED" \
+  | ./bin/bewaking object decrypt \
+      --encryption-key "$K1" --signing-key "$K2"
+;; => ((name . Joe) (score . 7))
+#+end_src
+
+** Passwords
+:PROPERTIES:
+:CUSTOM_ID: passwords
+:END:
+
+#+begin_src shell
+./bin/bewaking password strength 'correct horse battery staple'
+./bin/bewaking password generate --length 32
+./bin/bewaking password generate --length 16 --no-symbols
+#+end_src
+
+~password hash~ prepares a password for storage as an Argon2id PHC string, and
+~password verify~ checks one against it. Verification exits with =1= on a
+mismatch, so a shell can branch on it, and the password may come from a pipe so
+that it never appears in the process list:
+
+#+begin_src shell
+HASH=$(./bin/bewaking password hash 'correct horse battery staple')
+./bin/bewaking password verify "$HASH" 'correct horse battery staple'  # 0
+./bin/bewaking password verify "$HASH" 'password'                      # 1
+
+printf '%s' 'correct horse battery staple' | ./bin/bewaking password hash
+#+end_src
+
+** Exit codes
+:PROPERTIES:
+:CUSTOM_ID: exit-codes
+:END:
+
+The CLI exits with =0= on success and =1= on any error (missing keys, wrong
+key, unreadable input, unknown command). Diagnostics are written to standard
+error, so standard output stays clean for piping.
+
+----------------

@@ -1,0 +1,276 @@
+#+title: Sealed envelopes and key rotation
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:index.org][Documentation index]]
+
+* Generic payloads: encrypt-object / decrypt-object
+:PROPERTIES:
+:CUSTOM_ID: generic-payloads-encrypt-object-decrypt-object
+:END:
+
+You are not limited to authorization tokens. Any Scheme datum that ~write~ can
+serialize can be sealed with the exact same double-encryption, garbling and
+base16 pipeline, and reopened later:
+
+#+begin_src scheme
+(use-modules (bewaking bewaking))
+
+(define sealed
+  (encrypt-object #:payload '((user . "joe")
+                              (age . 42)
+                              (roles admin editor)
+                              (issued-at . 1672531200))
+                  #:encryption-key encryption-key
+                  #:signing-key    signing-key))
+
+(decrypt-object #:object sealed
+                #:encryption-key encryption-key
+                #:signing-key    signing-key)
+;; => ((user . "joe") (age . 42) (roles admin editor) (issued-at . 1672531200))
+#+end_src
+
+Supported payloads include alists, plain lists, vectors, numbers, strings,
+booleans and any nesting of those. The safe ~encrypt-object~ / ~decrypt-object~
+return =#f= on failure; ~unsafe-encrypt-object~ / ~unsafe-decrypt-object~ raise.
+
+Decrypted content is parsed with Scheme's ~read~, never ~eval~. Untrusted data
+therefore cannot execute code during decryption.
+
+----------------
+
+* Versioned and authenticated seals
+:PROPERTIES:
+:CUSTOM_ID: versioned-and-authenticated-seals
+:END:
+
+Sealed tokens and objects are wrapped in a self-describing envelope whose header
+also carries *rotation metadata*:
+
+#+begin_src text
+BWK3.<key-id>.<created-at>.<expires-at>.<body>
+#+end_src
+
+- =BWK3=: the *format version tag*. It leaves room for the format to evolve,
+  and says which integrity mechanism the envelope uses.
+- =<key-id>=: a short label identifying which key sealed the data (default
+  =“default”). It enables [[#key-rotation][key rotation]].
+- =<created-at>=: the Unix timestamp (seconds) at which the data was sealed.
+- =<expires-at>=: the Unix timestamp after which the data must not be opened,
+  or =-= when it never expires.
+- =<body>=: the authenticated sealed payload described below.
+
+** Authenticity from the cipher
+:PROPERTIES:
+:CUSTOM_ID: authenticity-from-the-cipher
+:END:
+
+The body is sealed with *AES-256-GCM*, under a key derived from the signing key.
+The four header fields above are passed to the cipher as *associated data*, so
+the one authentication tag covers the ciphertext *and* the metadata:
+
+#+begin_src text
+body = kdf-id(1) | salt(16) | nonce(12) | ciphertext | tag(16)     (Base16)
+#+end_src
+
+Only the two keys are needed; there is no MAC key to provision or rotate. Two
+properties follow from binding the header to the cipher:
+
+- The header cannot be *read as authentic* before the cipher accepts it.
+  ~open-envelope~ decrypts with the tag check built into the operation, so a
+  plaintext exists only once authenticity is established; altering =key-id=,
+  =created-at= or =expires-at=, including extending an expiry, makes the tag
+  fail rather than changing what the envelope means.
+- Tampering is *refused*, not reported in detail. The underlying cipher says
+  =GCM authentication failed=, which is exactly what a direct user of the
+  ~(bewaking crypto)~ primitive sees, because a tag is what tells a wrong key
+  from edited data. At the envelope layer, though, ~open-envelope~ deliberately
+  answers with one refusal for every "could not open this" cause; see
+  [[#a-refusal-does-not-enumerate-the-keyring][A refusal does not enumerate
+  the keyring]].
+
+Because the metadata is authenticated, =key-id=, =created-at= and =expires-at=
+can still be *audited without any key* through ~envelope-metadata~, which is what
+makes log review and rotation tooling possible. Reading the metadata is not the
+same as trusting it: ~open-envelope~ is the only place that decides.
+
+** A refusal does not enumerate the keyring
+:PROPERTIES:
+:CUSTOM_ID: a-refusal-does-not-enumerate-the-keyring
+:END:
+
+Every "we could not open this" answer is the same message, on every surface:
+the library's error, what ~decrypt-token~ prints, the CLI's message and its exit
+code:
+
+#+begin_src text
+bewaking: the sealed data could not be opened: unknown, retired or wrong key, or the data was altered.
+#+end_src
+
+The key id travels in the clear, so anybody can put any label in a token and
+watch how the attempt is refused. If an unknown label failed differently from a
+bad tag, or if the message merely named the label, the refusal itself would list
+which key ids a deployment configures, which is exactly the reconnaissance key
+rotation is supposed to be invisible to.
+
+So an unknown key id, a missing keyring entry, a retired key, a key that is not
+active yet, a wrong key and an altered body are one answer. An unresolvable key
+id does not even stop the attempt early: the envelope is opened with a freshly
+drawn placeholder key that cannot be right, so the work done, and therefore how
+long the refusal takes, is comparable to the wrong-key case as well. A retired
+key still opens nothing, because the placeholder is not the retired key.
+
+Expiry is the one deliberate exception. It is only reached *after* the tag has
+proved the envelope genuine, so telling an operator "this expired" reveals
+nothing an attacker could not already read from the envelope's own header with
+~envelope-metadata~. Everything else stays deliberately unspecific.
+
+** Rotation metadata: expiry and audit
+:PROPERTIES:
+:CUSTOM_ID: rotation-metadata-expiry-and-audit
+:END:
+
+Pass =#:ttl-seconds= (a lifetime from now) or =#:expires-at= (an absolute
+timestamp) when sealing to record an expiry. ~open-envelope~ then refuses to
+open data whose expiry has passed, and ~open-envelope~'s =#:max-age-seconds=
+adds a blanket “nothing older than this” policy:
+
+#+begin_src scheme
+(define sealed (seal-envelope #:plaintext "a shared secret"
+                              #:encryption-key k1 #:signing-key k2
+                              #:key-id "2026a"
+                              #:ttl-seconds (* 24 3600)))   ; good for a day
+
+;; Audit the header with no key at all; useful for tooling and log review.
+(envelope-metadata #:sealed sealed)
+;; => ((version . "BWK3") (key-id . "2026a")
+;;     (created-at . 1791709670) (expires-at . 1791796070))
+
+(envelope-expired? #:sealed sealed)                 ; => #f while it is live
+(open-envelope #:sealed sealed                       ; raises once expired
+               #:encryption-key k1 #:signing-key k2)
+(open-envelope #:sealed sealed #:now some-timestamp  ; deterministic checks
+               #:encryption-key k1 #:signing-key k2)
+#+end_src
+
+=#:enforce-expiry?= (default =#t=) and =#:allow-expired= on the command line
+exist for recovery and audit: they open expired data instead of refusing it.
+
+** Sealing API
+:PROPERTIES:
+:CUSTOM_ID: sealing-api
+:END:
+
+| Function            | Arguments                                                                                                       | Returns                                       |
+|---------------------+-----------------------------------------------------------------------------------------------------------------+-----------------------------------------------|
+| ~seal-envelope~     | =#:plaintext=, =#:encryption-key=, =#:signing-key=, =#:key-id=, =#:created-at=, =#:expires-at=, =#:ttl-seconds=, =#:kdf=, =#:random-source= | envelope string                               |
+| ~open-envelope~     | =#:sealed=, =#:encryption-key=, =#:signing-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=, =#:now= | plaintext string (raises on tamper/expiry)    |
+| ~sealed-envelope?~  | =sealed=                                                                                                        | =#t= when it is a versioned envelope          |
+| ~envelope-metadata~ | =#:sealed=                                                                                                      | alist of version/key-id/created-at/expires-at |
+| ~envelope-expired?~ | =#:sealed=, =#:now=                                                                                             | =#t= when the recorded expiry has passed      |
+
+#+begin_src scheme
+(define sealed (seal-envelope #:plaintext "a shared secret"
+                              #:encryption-key k1 #:signing-key k2))
+
+(open-envelope #:sealed sealed #:encryption-key k1 #:signing-key k2)
+;; => "a shared secret"
+#+end_src
+
+** Reproducible sealing
+:PROPERTIES:
+:CUSTOM_ID: reproducible-sealing
+:END:
+
+Sealing draws a fresh salt for each layer, a fresh nonce, and records the
+current time. All of them can be supplied, which is what a regression vector or
+a cross-implementation check needs:
+
+#+begin_src scheme
+(define (fixed-bytes length) (make-bytevector length 0))
+
+(seal-envelope #:plaintext "hello" #:encryption-key k1 #:signing-key k2
+               #:created-at 1800000000 #:random-source fixed-bytes)
+#+end_src
+
+The same keywords reproduce an envelope byte for byte. Never pass a constant
+source for real data: the GCM nonce must not repeat under one key.
+~generate-token~ takes =#:now= and =#:token-id= for the same reason, and
+~open-envelope~, ~decrypt-token~ and ~decrypt-object~ take =#:now=, so the
+age and expiry policy can be exercised without waiting for a clock.
+
+** Key rotation
+:PROPERTIES:
+:CUSTOM_ID: key-rotation
+:END:
+
+Every envelope records the key id that sealed it. Provide a *keyring*, an alist
+mapping key ids to their key entries, and bewaking selects the right keys
+automatically when opening. New data is sealed with a chosen key id.
+
+#+begin_src scheme
+(define keyring
+  '(("2026a" (encryption-key . "e1") (signing-key . "s1"))
+    ("2025b" (encryption-key . "e0") (signing-key . "s0"))))
+
+;; Seal with the current key.
+(define sealed (encrypt-object #:payload '((plan . pro))
+                               #:keyring keyring
+                               #:key-id "2026a"))
+
+;; Open with the keyring; the envelope's own key id selects the keys.
+(decrypt-object #:object sealed #:keyring keyring)
+;; => ((plan . pro))
+#+end_src
+
+To rotate keys: add the new key under a fresh key id, start sealing new data
+with it, and keep the old keyring entry until the last token sealed with it has
+expired. A keyring takes precedence over explicit keys; the same path works for
+~generate-token~, ~encrypt-object~, ~decrypt-token~ and ~decrypt-object~.
+
+*** Enforcing a rotation schedule
+:PROPERTIES:
+:CUSTOM_ID: enforcing-a-rotation-schedule
+:END:
+
+A keyring entry may carry a validity window, so a rotation policy is enforced at
+run time instead of relying on discipline:
+
+#+begin_src scheme
+(define keyring
+  '(("2026a" (encryption-key . "e1") (signing-key . "s1")
+             (not-before . 1780000000))
+    ("2025b" (encryption-key . "e0") (signing-key . "s0")
+             (not-after . 1790000000))))
+
+;; Raises while the window rejects the key: the data is sealed with a key that
+;; is not active yet, or has been retired, and cannot be opened at all.
+(decrypt-object #:object sealed #:keyring keyring)
+#+end_src
+
+=not-before= refuses to use a key before it is activated; =not-after= refuses
+once it is retired. Combine the two with the per-envelope =expires-at= to bound
+data to the lifetime of the key that protects it.
+
+*** One format, one integrity check
+:PROPERTIES:
+:CUSTOM_ID: one-format-one-integrity-check
+:END:
+
+BWK3 is the only envelope format bewaking writes and the only one it reads.
+There is no dual path, no auto-detection and no downgrade: the version tag is
+checked against the one known value before anything else is parsed, so a string
+carrying any other version tag is refused at the door with the same message as
+arbitrary text. A body sealed for one header does not open under another's: the
+header is part of what the tag authenticates, so relabelling an envelope breaks
+it rather than changing what it means.
+
+That single path is the point: a token is opened by one code route, decode,
+verify the GCM tag, then decrypt, and a body with an unexpected number of header
+fields is malformed rather than "an older shape". The known format versions are
+exposed as ~readable-seal-format-versions~, and today that list holds exactly one
+entry.
+
+----------------

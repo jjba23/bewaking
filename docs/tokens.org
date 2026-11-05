@@ -1,0 +1,209 @@
+#+title: Tokens and payloads
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:index.org][Documentation index]]
+
+* Introduction
+:PROPERTIES:
+:CUSTOM_ID: introduction
+:END:
+
+bewaking's core functionality is generating encrypted tokens and decrypting them and includes a simple permission functionality.
+
+For flexibility and using the power of Lisp, a user's token payload is accepted as thunk argument (lambda with no parameters). Then you can call ~generate-token~ with an encryption key (1st seal), signing key (2nd seal) and a thunk like this. These details will later be used by bewaking in the token.
+
+#+begin_src scheme
+(define get-owner-details
+  (lambda ()
+    `((id . "144959d3-7a8e-455e-b608-31e35145a2fa")
+      (email . "joe@example.com")
+      (name . "Joe")
+      (permissions read-only
+                   access-files
+                   manage-profile))))
+#+end_src
+
+The data that will actually be encrypted looks like this (and this is also the data you get from decrypting a token):
+
+#+begin_src scheme
+'((token-data
+   (token-type . "bewaking-token")
+   (token-id . "123e4567-e89b-12d3-a456-426655440000")
+   (token-created-at . 1672531200)
+   (token-expires-at . 1672534800))
+  (owner-data
+   (owner-id . "144959d3-7a8e-455e-b608-31e35145a2fa")
+   (owner-email . "joe@example.com")
+   (owner-name . "Joe")
+   (owner-permissions (read-only access-files manage-profile))))
+#+end_src
+
+* Double Encryption and Obfuscation
+:PROPERTIES:
+:CUSTOM_ID: double-encryption-and-obfuscation
+:END:
+
+The code employs a multi-layered approach to secure the token:
+
+1. *First Encryption (Payload Encryption):*
+    - The s-expression *payload* (the actual information inside the token, in the form of Lisp (Guile Scheme) code) is first converted into a string and then *Base64-encoded*. Base64 is a way to represent binary data as text, making it safe for transmission over text-based systems.
+    - This Base64-encoded string is then encrypted using *AES-256* (a strong encryption standard) with an ~encryption-key~. This is the first layer of real cryptographic protection, making the payload unreadable without the correct key. The encryption runs in-process through libgcrypt, in the exact format the ~openssl~ command line produces. The output of this step is also Base64-encoded.
+
+2.  *Obfuscation (Garbling):*
+     - The result from the first encryption (which is already Base64-encoded and encrypted) is then passed through a function called `string-garble`. This function isn't encryption; it's a simple **obfuscation** technique. It takes the string, splits it in half, reverses each half, and then recombines them (second half reversed, then first half reversed). This makes the string look scrambled and harder to read at a glance, but it's not cryptographically secure and can be easily reversed by `string-ungarble`. It adds a minor layer of confusion, not security.
+
+3.  *Second Encryption (Signing/Outer Encryption):*
+    - *The *garbled* (obfuscated) string from the previous step is then encrypted *again* using *AES-256* with a *different* key, called the ~signing-key~. This creates the final, external layer of encryption for the token. This layer essentially "signs" and seals the entire encrypted and garbled inner content, further protecting it and making it harder to tamper with.
+
+4. *Second garbling*
+   For an added layer of indirection and obfuscation we garble the contents again.
+
+5. *Hexadecimal encoding*:
+   - The signed payload (in base64) is finally encoded into a hexadecimal string (in base16) for maximum portability across systems and for an extra layer of indirection.
+
+When decrypting, the process is reversed: the token is first base16-decoded, then ungarbled, decrypted with the ~signing-key~, then ungarbled, then decrypted with the ~encryption-key~, and finally Base64-decoded to reveal the original payload.
+
+---------
+
+[[https://jointhefreeworld.org/static-assets/bewaking/logo-small.jpg]]
+
+---------
+
+*  Auth Token Payload
+:PROPERTIES:
+:CUSTOM_ID: auth-token-payload
+:END:
+
+The *token payload* is essentially the data or information that the token carries. When a token is generated, this is the information that gets secured inside it. In this code, the token payload is a list of key-value pairs (an "association list" in Scheme) that includes:
+
+Data about the token:
+-   token-type ::  Always ~bewaking-token~, identifying what kind of token this is, our stamp of approval!
+-  token-id ::  A unique identifier for this specific token, generated using a UUID (Universally Unique Identifier).
+-  token-created-at ::  The timestamp (time in seconds since the epoch) when the token was created.
+-  token-expires-at ::  The timestamp when the token will become invalid, calculated by adding a specified validity period to the creation time. This ensures tokens have a limited lifespan.
+
+The owner:
+-  owner-id ::  A unique identifier for the user or entity that owns or is associated with this token.
+-  owner-email ::  The email address of the token owner.
+-  owner-name ::  The name of the token owner.
+-  owner-permissions ::  A list or structure detailing what actions the token owner is allowed to perform.
+
+Before the payload is encrypted, the code checks if these essential fields are present using the ~token-payload-valid?~ function.
+If any are missing, it throws an error, indicating that a valid token cannot be generated without complete owner details.
+
+----------------
+
+* The token API
+:PROPERTIES:
+:CUSTOM_ID: the-token-api
+:END:
+
+All token functions live in ~(bewaking bewaking)~. Functions whose name starts
+with ~unsafe-~ raise errors on failure, while their unprefixed counterparts
+catch errors, print a message, and return =#f=.
+
+| Function                  | Arguments                                                                                                                                        | Returns                                     |
+|---------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------|
+| ~generate-token~          | =#:encryption-key=, =#:signing-key=, =#:get-owner-details=, =#:token-validity-seconds=, =#:key-id=, =#:keyring=, =#:ttl-seconds=, =#:expires-at=, =#:now=, =#:token-id=, =#:random-source= | token string, or =#f= on failure   |
+| ~decrypt-token~           | =#:token=, =#:encryption-key=, =#:signing-key=, =#:keyring=, =#:enforce-expiry?=, =#:max-age-seconds=                                            | payload alist, or =#f= on failure           |
+| ~unsafe-generate-token~   | same as ~generate-token~                                                                                                                         | token string (raises on failure)            |
+| ~unsafe-decrypt-token~    | same as ~decrypt-token~                                                                                                                          | payload alist (raises on failure)           |
+| ~token-payload-valid?~    | =payload=                                                                                                                                        | =#t= when every required field is present   |
+| ~is-token-expired?~       | =#:token=                                                                                                                                        | =#t= when =token-expires-at= is in the past |
+| ~token-remaining-seconds~ | =#:token=                                                                                                                                        | seconds left (negative once expired)        |
+| ~token-valid?~            | =#:token=                                                                                                                                        | =#t= when well-formed *and* unexpired       |
+
+There is no MAC key in this API. The envelope's integrity is the cipher tag
+inside its body, so sealing and opening both need exactly two keys: an
+=encryption-key= and a =signing-key=.
+
+*** Checking a token's lifetime
+:PROPERTIES:
+:CUSTOM_ID: checking-a-token-s-lifetime
+:END:
+
+#+begin_src scheme
+(is-token-expired? #:token payload)                 ; #f while still valid
+(token-remaining-seconds #:token payload)           ; e.g. 604800
+(token-valid? #:token payload)                      ; #t
+#+end_src
+
+~is-token-expired?~ and ~token-remaining-seconds~ raise an error when the
+payload has no numeric =token-expires-at= field. Use these helpers *after*
+decrypting a token; passing an arbitrary alist is not meaningful.
+
+These helpers examine the *decrypted payload*, whose expiry comes from
+=#:token-validity-seconds=. The envelope itself can carry an independent expiry
+(see [[file:sealing.org::#versioned-and-authenticated-seals][Versioned and authenticated seals]])
+via =#:ttl-seconds= or =#:expires-at=;
+~decrypt-token~ refuses to open a token whose envelope expiry has passed, so
+the two together let you bound a token both by its payload lifetime and by the
+rotation policy of the key that sealed it.
+
+----------------
+
+* Visualizing the process
+:PROPERTIES:
+:CUSTOM_ID: visualizing-the-process
+:END:
+
+** Token generation
+:PROPERTIES:
+:CUSTOM_ID: token-generation
+:END:
+
+#+begin_src mermaid
+graph LR
+
+A[Owner Details] --> B(Create Payload)
+B --> C{Payload Valid?}
+C -- Yes --> D[Encrypt with encryption-key]
+D --> E[Garble String]
+E --> X[Build header: key id + created-at + expires-at]
+X --> K[Seal with AES-256-GCM, header as associated data]
+K --> J[Generated Token: BWK3.kid.created.expires.body]
+C -- No --> I(Error)
+D -- Error --> I
+K -- Error --> I
+
+class I error;
+#+end_src
+
+** Token decryption
+:PROPERTIES:
+:CUSTOM_ID: token-decryption
+:END:
+
+#+begin_src mermaid
+graph LR
+
+H[Token] --> W[Read header: key id, created-at, expires-at]
+W --> V{Version tag known?}
+V -- No --> R(Error)
+V -- Yes --> J[Base16 Decode]
+J --> L[Verify tag and decrypt with signing-key]
+L -- No --> R(Error)
+L -- Yes --> Y{Envelope expired?
+policy allows it?}
+Y -- No --> R(Error)
+Y -- Yes --> K[Ungarble String]
+K --> M[Ungarble String]
+M --> N[Decrypt with encryption-key]
+N --> O{Decryption Successful?}
+O -- Yes --> P{Token Valid & Not Expired?}
+P -- Yes --> Q(Decrypted Payload)
+P -- No --> R(Error)
+O -- No --> R
+
+class R error;
+#+end_src
+
+There is one format and one path: an envelope is opened by decoding it,
+verifying the GCM tag (which covers the header as associated data) and
+decrypting, and any version tag other than =BWK3= stops the flow at the version
+check.
+
+---------------------

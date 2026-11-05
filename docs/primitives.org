@@ -1,0 +1,125 @@
+#+title: Cryptographic primitives
+#+author: Josep Bigorra
+#+email: jjbigorra@gmail.com
+#+options: toc:nil
+#+language: en
+
+[[file:index.org][Documentation index]]
+
+* Low-level primitives
+:PROPERTIES:
+:CUSTOM_ID: low-level-primitives
+:END:
+
+These building blocks are exported for advanced use and are exactly the
+operations the higher-level API is composed from.
+
+| Function                   | Purpose                                                  |
+|----------------------------+----------------------------------------------------------|
+| ~encrypt-payload= str key~ | One AES-256 (PBKDF2) encryption pass, base64-encoded     |
+| ~decrypt-payload= str key~ | Reverse of ~encrypt-payload~                             |
+| ~string-garble= s~         | Reversible obfuscation (split, reverse halves, swap)     |
+| ~string-ungarble= s~       | Reverse of ~string-garble~                               |
+| ~base16-encode= s~         | Hexadecimal encode (in-process, see below)               |
+| ~base16-decode= s~         | Hexadecimal decode (in-process, accepts upper and lower) |
+| ~has-needed-permissions?~  | Set-subset check for permission symbols                  |
+| ~constant-time-equal?= a b~ | Byte comparison whose running time does not depend on where two values differ |
+| ~condition-message= key args~ | Human-readable text for an exception caught as a key and argument list |
+
+#+begin_src scheme
+(encrypt-payload "mysecretdata" "mysecretkey")
+;; => a base64 string starting with "U2FsdGVkX1+..."
+
+(string-ungarble (string-garble "hello world")) ; => "hello world"
+#+end_src
+
+----------------
+
+* Native cryptography
+:PROPERTIES:
+:CUSTOM_ID: native-cryptography
+:END:
+
+The module ~(bewaking crypto)~ holds the crypto primitives. They run in this
+process, so there is no subprocess to spawn, no shell to quote against, and no
+~PATH~ to depend on.
+
+| Function                          | Arguments                                                                                                             | Returns                                                     |
+|-----------------------------------+-----------------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------|
+| ~openssl-encrypt~                 | =#:plaintext=, =#:key=, =#:salt=                                                                                      | the OpenSSL-format Base64 blob                              |
+| ~openssl-decrypt~                 | =#:ciphertext=, =#:key=                                                                                               | the original string (raises on bad padding)                 |
+| ~hmac-sha256-hex~                 | =key=, =message=                                                                                                      | lowercase hexadecimal HMAC-SHA256                           |
+| ~pbkdf2-sha256~                   | =password=, =salt=, =length=, =#:iterations=                                                                          | the derived bytes as a bytevector                           |
+| ~argon2id-derive~                 | =password=, =salt=, =length=, =#:memory-kib=, =#:iterations=, =#:parallelism=                                         | the derived bytes as a bytevector                           |
+| ~derive-key-material~             | =kdf=, =password=, =salt=, =length=                                                                                   | the derived bytes, for any KDF in ~kdf-spec~                |
+| ~kdf-encrypt~ / ~kdf-decrypt~     | =plaintext=, =key=, =#:kdf=, =#:salt=                                                                                 | the self-describing CBC blob / the plaintext                |
+| ~gcm-encrypt~ / ~gcm-decrypt~     | =plaintext=, =key=, =#:kdf=, =#:salt=, =#:nonce=, =#:associated-data= (decrypt: =sealed=, =key=, =#:associated-data=) | the Base16 authenticated payload / the plaintext bytevector |
+| ~base16->bytes~                   | a hexadecimal string                                                                                                  | the decoded bytevector                                      |
+| ~base16-encode~ / ~base16-decode~ | a string                                                                                                              | hexadecimal text / the decoded string                       |
+| ~base64-encode~ / ~base64-decode~ | a string                                                                                                              | Base64 text / the decoded string                            |
+| ~bytes->base16~ / ~bytes->base64~ | a bytevector                                                                                                          | the encoded text                                            |
+| ~base64->bytes~                   | a Base64 string                                                                                                       | the decoded bytevector                                      |
+| ~random-bytes~                    | =#:length= (default 8)                                                                                                | strong random bytes from libgcrypt                          |
+
+AES-256-CBC, AES-256-GCM, PBKDF2 and Argon2id come from libgcrypt, the C library
+Guile already links through =guile-gcrypt=, which publishes no Scheme bindings
+for ciphers or key derivation; the module binds ~gcry_cipher_*~,
+~gcry_kdf_derive~ and the stateful ~gcry_kdf_open~ / ~gcry_kdf_compute~ /
+~gcry_kdf_final~ trio itself with Guile's FFI. Argon2id needs libgcrypt 1.11 or
+newer, and ~argon2id-available?~ reports whether the loaded library has it.
+HMAC-SHA256 uses =guile-gcrypt='s ~sign-data~, and the encodings are plain
+Scheme.
+
+#+begin_src scheme
+(use-modules (bewaking crypto))
+
+;; A deterministic blob, given a fixed salt.
+(openssl-encrypt "bewaking" "mysecretkey"
+                 #:salt (make-bytevector 8 0))
+;; => "U2FsdGVkX18AAAAAAAAAAKkuKL+nA1jqz6ecDqWJMqc="
+
+(base64-encode "foobar")          ; => "Zm9vYmFy"
+(base16-encode "hello")           ; => "68656c6c6f"
+(hmac-sha256-hex "Jefe" "what do ya want for nothing?")
+;; => "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+#+end_src
+
+*** Interoperability with OpenSSL
+:PROPERTIES:
+:CUSTOM_ID: interoperability-with-openssl
+:END:
+
+The AES layer of the pipeline is the format OpenSSL writes, so blobs travel in
+both directions. That makes the OpenSSL CLI a convenient cross-check rather
+than a requirement:
+
+#+begin_src shell
+# A blob produced by (bewaking crypto) opens with the OpenSSL CLI ...
+printf %s "$BLOB" | openssl aes-256-cbc -d -pbkdf2 -a -A -base64 -k "$KEY"
+
+# ... and a blob produced by the OpenSSL CLI opens with (bewaking crypto).
+printf %s 'bewaking' | openssl enc -aes256 -pbkdf2 -a -A -k "$KEY" \
+  | ... (openssl-decrypt blob "$KEY")
+#+end_src
+
+From Scheme, the same two directions are:
+
+#+begin_src scheme
+;; bewaking -> OpenSSL
+(openssl-encrypt "bewaking" "mysecretkey" #:salt (make-bytevector 8 0))
+;; => "U2FsdGVkX18AAAAAAAAAAKkuKL+nA1jqz6ecDqWJMqc="
+
+;; OpenSSL -> bewaking
+(openssl-decrypt "U2FsdGVkX19Ul01q1RroU5wq09nZ+ftDyRPwKRg32hSZlll8jqSu+OwtJTiS3T6J"
+                 "952e0690-6c3b-4828-b191-961bf98d055c")
+;; => "a secret that openssl sealed"
+#+end_src
+
+The reference values used by the test suite were generated with OpenSSL 3.5 and
+Python's =cryptography=, and can be regenerated with ~openssl kdf~
+(PBKDF2-HMAC-SHA256), ~openssl dgst -sha256 -hmac~ (the HMAC) and ~openssl enc~
+(the AES-CBC layer). The GCM payload
+format is checked byte-for-byte against =cryptography='s ~AESGCM~, under both
+derivations, and the Argon2id derivation against the RFC 9106 test vector.
+
+----------------
