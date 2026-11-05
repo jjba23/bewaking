@@ -12,7 +12,7 @@
 :END:
 
 Tests live under [[file:../test/veritas/unit/][test/veritas/unit]] and use
-[[https://codeberg.org/jjba23/guile-veritas][guile-veritas]].
+[[https://github.com/jjba23/veritas][guile-veritas]].
 
 Run the whole suite through the project task runner:
 
@@ -110,10 +110,9 @@ binding from both ~(bewaking bewaking)~ and ~(bewaking password)~.
 :CUSTOM_ID: projects-that-use-bewaking
 :END:
 
-- WikiMusic (Musical CMS and platform) :: https://codeberg.org/jjba23/wikimusic
-- LucidPlan (Project Management) :: https://codeberg.org/jjba23/lucidplan
-- Byggsteg (CI/CD orchestrator) :: https://codeberg.org/jjba23/byggsteg
-- Byggsteg CI/CD Woodpecker Integration :: https://codeberg.org/jjba23/byggsteg-woodpecker
+- WikiMusic (Musical CMS and platform) :: https://github.com/jjba23/wikimusic
+- LucidPlan (Project Management) :: https://github.com/jjba23/lucidplan
+- Byggsteg (CI/CD orchestrator) :: https://github.com/jjba23/byggsteg
 
 ------------------------
 

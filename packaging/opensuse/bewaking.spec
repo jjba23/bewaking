@@ -17,7 +17,7 @@ Version:        0.5.0
 Release:        0
 Summary:        Authentication and authorization library for Guile Scheme
 License:        MIT
-URL:            https://codeberg.org/jjba23/bewaking
+URL:            https://github.com/jjba23/bewaking
 Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  pkgconfig(guile-3.0)
 BuildRequires:  guile-gcrypt

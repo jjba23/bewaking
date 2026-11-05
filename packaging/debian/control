@@ -12,9 +12,9 @@ Build-Depends:
  guile-gcrypt,
  guile-uuid
 Standards-Version: 4.6.2
-Homepage: https://codeberg.org/jjba23/bewaking
-Vcs-Git: https://codeberg.org/jjba23/bewaking.git
-Vcs-Browser: https://codeberg.org/jjba23/bewaking
+Homepage: https://github.com/jjba23/bewaking
+Vcs-Git: https://github.com/jjba23/bewaking.git
+Vcs-Browser: https://github.com/jjba23/bewaking
 Rules-Requires-Root: no
 
 Package: bewaking

@@ -87,7 +87,7 @@ shell is enough to get a complete, reproducible environment.
 The jointhefreeworld channel carries ~guile-bewaking~ at 0.5.0, so a checkout of the channel is enough — no package definition to write:
 
 #+begin_src shell
-git clone https://codeberg.org/jjba23/guix-jointhefreeworld.git
+git clone https://github.com/jjba23/guix-jointhefreeworld.git
 guix install -L ./guix-jointhefreeworld guile-bewaking
 #+end_src
 

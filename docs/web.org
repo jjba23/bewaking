@@ -196,7 +196,7 @@ decryption is the expensive part.
 Only two things are asked of a framework: read a cookie or a header, and set one.
 Anything offering those two operations can use the helper above unchanged.
 WikiMusic's
-[[https://codeberg.org/jjba23/wikimusic/src/branch/main/lib/wikimusic/auth.scm][~bewaking-endpoint~]]
+[[https://github.com/jjba23/wikimusic/blob/trunk/lib/wikimusic/auth.scm][~bewaking-endpoint~]]
 is one rendering of it, wrapped to take ~#:happy-flow~ / ~#:unhappy-flow~ thunks.
 
 ** Sealed objects: stateless state that must not be tampered with

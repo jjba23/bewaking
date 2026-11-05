@@ -57,7 +57,7 @@ stdenv.mkDerivation {
 
   meta = with lib; {
     description = "Authentication and authorization library for GNU Guile";
-    homepage = "https://codeberg.org/jjba23/bewaking";
+    homepage = "https://github.com/jjba23/bewaking";
     license = licenses.mit;
     platforms = guile.meta.platforms;
   };

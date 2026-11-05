@@ -9,7 +9,7 @@ pkgver=0.5.0
 pkgrel=1
 pkgdesc="Authentication and authorization library for Guile Scheme"
 arch=('any')
-url="https://codeberg.org/jjba23/bewaking"
+url="https://github.com/jjba23/bewaking"
 license=('MIT')
 
 depends=(
@@ -25,7 +25,7 @@ makedepends=(
   'pkgconf'
 )
 
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('2175e96f81b172c565056c0de084267785166933d5983d25e49ba529b956e3eb')
 
 # NOTE: guile-uuid is not in the official repositories or the AUR yet; the

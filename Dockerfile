@@ -61,7 +61,7 @@ ENV LANG=C.UTF-8 \
 
 LABEL org.opencontainers.image.title="bewaking" \
       org.opencontainers.image.description="Authentication and authorization library for Guile Scheme" \
-      org.opencontainers.image.url="https://codeberg.org/jjba23/bewaking" \
+      org.opencontainers.image.url="https://github.com/jjba23/bewaking" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}"
 
