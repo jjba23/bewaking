@@ -5,7 +5,7 @@
 
 # Maintainer: Josep Bigorra <jjbigorra@gmail.com>
 pkgname=bewaking
-pkgver=0.4.7
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Authentication and authorization library for Guile Scheme"
 arch=('any')
