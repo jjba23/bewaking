@@ -5,7 +5,7 @@
 #+language: en
 
 [[https://jointhefreeworld.org/ggg/dist/bewaking.svg]] [[https://jointhefreeworld.org/ggg/dist/scheme-guile.svg]] [[https://jointhefreeworld.org/ggg/dist/gnu-guix.svg]]
-[[https://jointhefreeworld.org/ggg/dist/license-lgpl3+.svg]]    [[https://jointhefreeworld.org/ggg/dist/license-fdl13+.svg]]
+[[https://jointhefreeworld.org/ggg/dist/license-mit.svg]]
 
 #+attr_html: :width 160 :alt Bewaking logo
 [[file:logo.svg]]
@@ -1778,13 +1778,11 @@ check.
 :CUSTOM_ID: licensing
 :END:
 
-bewaking and all of its source code are free software, licensed under the GNU Lesser General Public License v3 (or newer at your convenience).
+bewaking and all of its source code are free software, licensed under the [[https://opensource.org/license/mit][MIT License]].
 
-https://www.gnu.org/licenses/lgpl-3.0.html
+The documentation and examples, including this document, which are provided with bewaking, are all licensed under the Creative Commons Attribution 4.0 International License.
 
-The documentation and examples, including this document, which are provided with bewaking, are all licensed under the GNU Free Documentation License v1.3 (or newer at your convenience).
-
-https://www.gnu.org/licenses/fdl-1.3.html
+https://creativecommons.org/licenses/by/4.0/
 
 ----------------------
 

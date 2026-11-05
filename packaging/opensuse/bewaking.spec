@@ -1,17 +1,10 @@
+# bewaking
+#
+# SPDX-License-Identifier: MIT
+# Copyright © Josep Bigorra <jjbigorra@gmail.com>
 #
 # spec file for package bewaking
 #
-# Copyright (c) 2026 SUSE LLC and contributors
-#
-# All modifications and additions to the file contributed by third parties
-# remain the property of their copyright owners, unless otherwise agreed
-# upon. The license for this file, and modifications and additions to the
-# file, is the same license as for the pristine package itself (unless the
-# license for the pristine package is not an Open Source License, in which
-# case the license is the MIT License). An "Open Source License" is a
-# license that conforms to the Open Source Definition (Version 1.9)
-# published by the Open Source Initiative.
-
 # Please submit bugfixes or comments via http://bugs.opensuse.org/
 #
 
@@ -23,7 +16,7 @@ Name:           bewaking
 Version:        0.4.7
 Release:        0
 Summary:        Authentication and authorization library for Guile Scheme
-License:        LGPL-3.0-or-later
+License:        MIT
 URL:            https://codeberg.org/jjba23/bewaking
 Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  pkgconfig(guile-3.0)
@@ -82,7 +75,7 @@ sed -i 's|"$here/src"|"%{_datadir}/guile/site/3.0"|' %{buildroot}%{_bindir}/bewa
 # %check omitted.
 
 %files
-%license COPYING
+%license LICENSE
 %doc README.org
 %{_bindir}/bewaking
 %dir %{_datadir}/guile

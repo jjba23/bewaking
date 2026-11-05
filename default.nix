@@ -1,19 +1,7 @@
 # bewaking
-
+#
+# SPDX-License-Identifier: MIT
 # Copyright © Josep Bigorra <jjbigorra@gmail.com>
-
-# bewaking is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# bewaking is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-
-# You should have received a copy of the GNU Lesser General Public License
-# along with bewaking.  If not, see <https://www.gnu.org/licenses/>.
 
 # The package of this checkout as it stands.  It is the same derivation as the
 # `guile-bewaking' package in nixpkgs -- same phases, same layout under $out --
@@ -70,7 +58,7 @@ stdenv.mkDerivation {
   meta = with lib; {
     description = "Authentication and authorization library for GNU Guile";
     homepage = "https://codeberg.org/jjba23/bewaking";
-    license = licenses.lgpl3Plus;
+    license = licenses.mit;
     platforms = guile.meta.platforms;
   };
 }
