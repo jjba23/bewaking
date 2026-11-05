@@ -118,6 +118,79 @@
                                (generate-strong-password #:length 2))
                              #:name "too-short a request raises an error"))))
 
+;; Hashing is tested with the cheapest usable Argon2id parameters (8 KiB, one
+;; pass, one lane) so the suite stays fast; the production defaults are 64 MiB
+;; and three passes, which the library tests elsewhere through `kdf-spec'.
+(define (fast-hash password)
+  (hash-password #:password password #:memory-kib 8 #:iterations 1
+                 #:parallelism 1))
+
+(define (hashing-roundtrip?)
+  (verify-password #:password "correct horse battery staple"
+                   #:hash (fast-hash "correct horse battery staple")))
+
+(define (wrong-password-verifies?)
+  (verify-password #:password "wrong"
+                   #:hash (fast-hash "correct horse battery staple")))
+
+(define (memory-ceiling-refuses?)
+  ;; The hash records 64 KiB; the verifier is told not to trust anything above
+  ;; 8 KiB, so it must answer #f without deriving — the password is right, so a
+  ;; #f here can only come from the cost bound.
+  (verify-password #:password "same"
+                   #:hash (hash-password #:password "same" #:memory-kib 64
+                                         #:iterations 1 #:parallelism 1)
+                   #:max-memory-kib 8))
+
+(define (iteration-ceiling-refuses?)
+  (verify-password #:password "same"
+                   #:hash (fast-hash "same")
+                   #:max-iterations 0))
+
+(define hashing-suite
+  (suite "Password hashing"
+         (test "hash-password and verify-password"
+               (assert-true (password-hash? (fast-hash "correct horse battery staple"))
+                            #:name "a hash is a well-formed PHC Argon2id string")
+               (assert-true (string-prefix? "$argon2id$v=19$m=8,t=1,p=1$"
+                                            (fast-hash "x"))
+                            #:name "the requested parameters are the ones recorded")
+               (assert-true (hashing-roundtrip?)
+                            #:name "the right password verifies")
+               (assert-false (wrong-password-verifies?)
+                             #:name "a wrong password does not verify")
+               (assert-false (password-hash? "not a hash")
+                             #:name "plain text is not a password hash")
+               (assert-false (verify-password #:password "x" #:hash "not a hash")
+                             #:name "a malformed hash verifies nothing")
+               (assert-false (password-hash? "")
+                             #:name "the empty string is not a password hash"))
+         (test "salts and cost ceilings"
+               (assert-false (string=? (fast-hash "same") (fast-hash "same"))
+                             #:name "two hashes of one password differ, so each carries a fresh salt")
+               (assert-false (memory-ceiling-refuses?)
+                             #:name "a recorded memory cost above the ceiling is refused")
+               (assert-false (iteration-ceiling-refuses?)
+                             #:name "a recorded pass count above the ceiling is refused"))))
+
+
+(define label-suite
+  (suite "Strength labels"
+         (test "password-strength-label"
+               (assert-equal #:expect "very weak"
+                             #:got (password-strength-label 0))
+               (assert-equal #:expect "weak"
+                             #:got (password-strength-label 1))
+               (assert-equal #:expect "fair"
+                             #:got (password-strength-label 2))
+               (assert-equal #:expect "strong"
+                             #:got (password-strength-label 3))
+               (assert-equal #:expect "very strong"
+                             #:got (password-strength-label 4))
+               (assert-equal #:expect "unknown"
+                             #:got (password-strength-label 9)
+                             #:name "a score outside 0-4 is labelled unknown"))))
+
 (define (spec)
   (veritas-run character-class-suite entropy-suite strength-suite
-               generator-suite))
+               generator-suite hashing-suite label-suite))

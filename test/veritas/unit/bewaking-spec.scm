@@ -8,6 +8,7 @@
   #:use-module (bewaking bewaking)
   #:use-module (bewaking crypto)
   #:use-module (ice-9 string-fun)
+  #:use-module (rnrs bytevectors)
   #:use-module (uuid generate))
 
 (set! *random-state*
@@ -1043,10 +1044,156 @@
                                         #:key-id "has.a.dot")))
                             #:name "a key id containing a dot is rejected"))))
 
+(define (fixed-bytes length)
+  "A random source for a reproducible seal: every byte is zero. Safe in a test
+   and nowhere else, because a constant source repeats the GCM nonce."
+  (make-bytevector length 0))
+
+(define (deterministic-envelope)
+  (seal-envelope #:plaintext "hello"
+                 #:encryption-key some-valid-encryption-key
+                 #:signing-key some-valid-signing-key
+                 #:created-at 1800000000
+                 #:random-source fixed-bytes))
+
+(define (deterministic-token)
+  (generate-token #:encryption-key some-valid-encryption-key
+                  #:signing-key some-valid-signing-key
+                  #:get-owner-details
+                  (lambda ()
+                    '((id . "owner-1")
+                      (email . "joe@example.com")
+                      (name . "Joe")
+                      (permissions read)))
+                  #:now 1800000000
+                  #:token-id "123e4567-e89b-12d3-a456-426655440000"
+                  #:random-source fixed-bytes))
+
+(define (deterministic-payload)
+  (unsafe-decrypt-token #:token (deterministic-token)
+                        #:encryption-key some-valid-encryption-key
+                        #:signing-key some-valid-signing-key
+                        #:now 1800000000))
+
+(define (decrypt-failure-streams)
+  "The (standard output . standard error) a failing safe wrapper produces.
+
+   A library that prints its diagnosis on standard output makes it impossible
+   to pipe the result of a successful call while a failure is printed beside it,
+   so the pair is pinned here rather than left to inspection."
+  (let ((output (make-vector 1 "")))
+    (let ((errors (with-error-to-string
+                   (lambda ()
+                     (vector-set! output 0
+                                  (with-output-to-string
+                                    (lambda ()
+                                      (decrypt-token
+                                       #:token "not a bewaking envelope"
+                                       #:encryption-key
+                                       some-valid-encryption-key
+                                       #:signing-key
+                                       some-valid-signing-key))))))))
+      (cons (vector-ref output 0) errors))))
+
+(define determinism-suite
+  (suite "Deterministic sealing and diagnostics"
+         (test "a fixed clock and random source make sealing reproducible"
+               (assert-equal #:expect (deterministic-envelope)
+                             #:got (deterministic-envelope)
+                             #:name "two envelopes sealed the same way are identical")
+               (assert-equal #:expect (deterministic-token)
+                             #:got (deterministic-token)
+                             #:name "two tokens generated the same way are identical")
+               (assert-equal #:expect 1800000000
+                             #:got (assoc-ref (envelope-metadata
+                                               #:sealed (deterministic-envelope))
+                                              'created-at)
+                             #:name "the envelope header records the supplied clock")
+               (assert-equal #:expect "123e4567-e89b-12d3-a456-426655440000"
+                             #:got (assoc-ref (deterministic-payload) 'token-id)
+                             #:name "the supplied token id is the one read back")
+               (assert-equal #:expect 1800000000
+                             #:got (assoc-ref (deterministic-payload)
+                                              'token-created-at)
+                             #:name "the supplied clock is the payload's creation time"))
+         (test "an explicit clock drives the age policy"
+               (assert-true (raises? (lambda ()
+                                       (open-envelope
+                                        #:sealed (deterministic-envelope)
+                                        #:encryption-key
+                                        some-valid-encryption-key
+                                        #:signing-key some-valid-signing-key
+                                        #:now (+ 1800000000 10)
+                                        #:max-age-seconds 5)))
+                            #:name "max-age-seconds is measured against the given clock"))
+         (test "a failure is reported on standard error"
+               (assert-equal #:expect ""
+                             #:got (car (decrypt-failure-streams))
+                             #:name "a failing decrypt-token prints nothing on standard output")
+               (assert-true (if (string-contains (cdr (decrypt-failure-streams))
+                                             "error decrypting token") #t #f)
+                            #:name "its diagnosis is written to standard error"))))
+
+
+(define (fixed-salt length)
+  "A deterministic salt for the reproducible payload checks."
+  (make-bytevector length 1))
+
+(define payload-primitives-suite
+  (suite "Payload primitives"
+         (test "encrypt-payload and decrypt-payload"
+               (let ((sealed (encrypt-payload "mysecretdata"
+                                              some-valid-encryption-key
+                                              #:salt (fixed-salt 8))))
+                 (assert-equal #:expect "mysecretdata"
+                               #:got (decrypt-payload sealed
+                                                      some-valid-encryption-key)
+                               #:name "a payload round-trips under the same key")
+                 (assert-equal #:expect sealed
+                               #:got (encrypt-payload "mysecretdata"
+                                                      some-valid-encryption-key
+                                                      #:salt (fixed-salt 8))
+                               #:name "a supplied salt makes the output reproducible")
+                 (assert-true (raises? (lambda ()
+                                         (decrypt-payload
+                                          sealed some-valid-signing-key)))
+                              #:name "a different key does not open the payload")))
+         (test "token-payload-valid?"
+               (let* ((token (generate-token
+                              #:encryption-key some-valid-encryption-key
+                              #:signing-key some-valid-signing-key
+                              #:get-owner-details get-owner-details))
+                      (payload (decrypt-token #:token token
+                                              #:encryption-key
+                                              some-valid-encryption-key
+                                              #:signing-key
+                                              some-valid-signing-key)))
+                 (assert-true (token-payload-valid? payload)
+                              #:name "a decrypted token payload is valid")
+                 (assert-false (token-payload-valid?
+                                (acons 'token-type #f payload))
+                               #:name "a missing token type is invalid")
+                 (assert-false (token-payload-valid? '())
+                               #:name "an empty payload is invalid")))
+         (test "unsafe-generate-token"
+               (assert-error (lambda ()
+                               (unsafe-generate-token
+                                #:encryption-key some-valid-encryption-key
+                                #:signing-key some-valid-signing-key
+                                #:get-owner-details (lambda () '())))
+                             #:name "incomplete owner details raise instead of returning #f")
+               (assert-true (string? (unsafe-generate-token
+                                      #:encryption-key
+                                      some-valid-encryption-key
+                                      #:signing-key some-valid-signing-key
+                                      #:get-owner-details get-owner-details))
+                            #:name "valid details produce a token string"))))
+
 (define (spec)
   (veritas-run generate-token-suite decode-token-suite lossless-token-suite
                garble-ungarble-string-suite has-needed-permissions-suite
                is-token-expired-suite token-helpers-suite
                generic-object-suite sealed-envelope-suite
-               envelope-metadata-suite))
+               envelope-metadata-suite determinism-suite
+               payload-primitives-suite))
 

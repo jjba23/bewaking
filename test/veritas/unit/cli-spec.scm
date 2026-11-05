@@ -5,7 +5,9 @@
 
 (define-module (veritas unit cli-spec)
   #:use-module (veritas veritas)
+  #:use-module (ice-9 popen)
   #:use-module (ice-9 string-fun)
+  #:use-module (ice-9 textual-ports)
   #:use-module (bewaking cli)
   #:use-module (bewaking password))
 
@@ -478,6 +480,102 @@
                (assert-true (cli-key-id-refusals-are-uniform?)
                             #:name "an unknown key id and an edited body give the same message and exit code"))))
 
+;; The hashing commands are the scripting surface for a deployment that wants
+;; to store passwords without linking Guile: the hash goes to standard output,
+;; the verdict is the exit code, and a failure says nothing beside a success.
+(define (cli-hash password)
+  (string-trim-right (cli-out (run-cli (list "password" "hash" password)))))
+
+(define (cli-hash-verifies?)
+  (= 0 (cli-code (run-cli (list "password" "verify" (cli-hash "correct horse battery staple")
+                              "correct horse battery staple")))))
+
+(define (cli-hash-rejects?)
+  (= 1 (cli-code (run-cli (list "password" "verify" (cli-hash "correct horse battery staple")
+                              "wrong password")))))
+
+(define (cli-verify-failure-output)
+  (car (run-cli-with-error
+        (list "password" "verify" (cli-hash "correct horse battery staple")
+              "wrong password"))))
+
+(define password-hashing-suite
+  (suite "CLI password hashing"
+         (test "password hash and verify"
+               (assert-true (password-hash? (cli-hash "correct horse battery staple"))
+                            #:name "the command prints a PHC Argon2id hash")
+               (assert-true (cli-hash-verifies?)
+                            #:name "the same password verifies with exit code 0")
+               (assert-true (cli-hash-rejects?)
+                            #:name "a wrong password exits with 1")
+               (assert-equal #:expect ""
+                             #:got (cli-verify-failure-output)
+                             #:name "a failed verification writes nothing to standard output")
+               (assert-equal #:expect 1
+                             #:got (cli-code (run-cli (list "password" "verify"
+                                                             "not-a-hash" "x")))
+                             #:name "a malformed hash exits with 1"))))
+
+
+(define (cli-help-works?)
+  (let ((result (run-cli (list "--help"))))
+    (and (= 0 (cli-code result))
+         (if (string-contains (cli-out result) "Usage:") #t #f))))
+
+(define (argon2id-parallelism-round-trip?)
+  (let* ((generated (run-cli (list "token" "generate" "--owner-id" "o1"
+                                   "--encryption-key" encryption-key
+                                   "--signing-key" signing-key
+                                   "--kdf" "argon2id"
+                                   "--kdf-memory-kib" "64"
+                                   "--kdf-iterations" "1"
+                                   "--kdf-parallelism" "2")))
+         (token (string-trim-right (cli-out generated)))
+         (decrypted (run-cli (list "token" "decrypt" "--token" token
+                                   "--encryption-key" encryption-key
+                                   "--signing-key" signing-key))))
+    (and (= 0 (cli-code generated))
+         (= 0 (cli-code decrypted))
+         (if (string-contains (cli-out decrypted) "owner-id") #t #f))))
+
+(define (env-keys-round-trip?)
+  ;; The environment fallbacks are exercised in a child process, with `env'
+  ;; supplying the variables to that process alone: setenv here would change
+  ;; what every concurrently running test sees, which Guile documents as
+  ;; unspecified once threads are running.
+  (let* ((prefix (string-append "env BEWAKING_ENCRYPTION_KEY=" encryption-key
+                                " BEWAKING_SIGNING_KEY=" signing-key))
+         (generate (open-input-pipe
+                    (string-append
+                     prefix " guile -L ./src -c "
+                     "'(exit ((@ (bewaking cli) run) "
+                     "(list \"token\" \"generate\" \"--owner-id\" \"o1\")))'")))
+         (token (string-trim-right (get-string-all generate)))
+         (generate-status (close-pipe generate)))
+    (and (zero? generate-status)
+         (not (string-null? token))
+         (let* ((decrypt (open-input-pipe
+                          (string-append
+                           prefix " guile -L ./src -c "
+                           "'(exit ((@ (bewaking cli) run) "
+                           "(list \"token\" \"decrypt\" \"--token\" \""
+                           token "\")))'")))
+                (output (get-string-all decrypt))
+                (decrypt-status (close-pipe decrypt)))
+           (and (zero? decrypt-status)
+                (if (string-contains output "owner-id") #t #f))))))
+
+(define cli-surface-suite
+  (suite "CLI surface"
+         (test "help, parallel Argon2id and environment keys"
+               (assert-true (cli-help-works?)
+                            #:name "--help prints the usage text and exits 0")
+               (assert-true (argon2id-parallelism-round-trip?)
+                            #:name "--kdf-parallelism seals and opens an Argon2id token")
+               (assert-true (env-keys-round-trip?)
+                            #:name "BEWAKING_ENCRYPTION_KEY and BEWAKING_SIGNING_KEY are picked up"))))
+
 (define (spec)
   (veritas-run dispatch-suite token-suite object-suite password-suite
-               rotation-metadata-suite format-policy-suite))
+               rotation-metadata-suite format-policy-suite
+               password-hashing-suite cli-surface-suite))

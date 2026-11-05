@@ -38,6 +38,13 @@
 (define openssl-fixed-blob
   "U2FsdGVkX18AAQIDBAUGByAGpafcjamTQUX3eOyvQUE=")
 
+(define (flip-last-byte)
+  "A four-byte vector that differs from (make-bytevector 4 7) only in its last
+   byte, so a comparison that stops early would still see the first three."
+  (let ((bytes (make-bytevector 4 7)))
+    (bytevector-u8-set! bytes 3 8)
+    bytes))
+
 ;; Produced by `printf %s 'a secret that openssl sealed' |
 ;;   openssl enc -aes256 -pbkdf2 -a -A -k <encryption-key>'
 ;; i.e. by OpenSSL itself, with its own random salt.
@@ -766,10 +773,117 @@
                              "GCM authentication failed")
                             #:name "a cost inside the bounds is derived, then fails the tag: the bound is not a blanket refusal"))))
 
+(define constant-time-suite
+  (suite "Constant-time comparison"
+         (test "constant-time-equal?"
+               (assert-true (constant-time-equal? "same" "same")
+                            #:name "equal strings compare equal")
+               (assert-false (constant-time-equal? "same" "samf")
+                             #:name "one differing byte is not equal")
+               (assert-false (constant-time-equal? "same" "same and more")
+                             #:name "different lengths are not equal")
+               (assert-true (constant-time-equal?
+                             (make-bytevector 4 7) (make-bytevector 4 7))
+                            #:name "equal bytevectors compare equal")
+               (assert-false (constant-time-equal? (flip-last-byte) (make-bytevector 4 7))
+                             #:name "a difference in the last byte is still found")
+               (assert-error (lambda () (constant-time-equal? 1 2))
+                             #:name "values that are neither strings nor bytevectors are refused"))))
+
+(define salt-length-suite
+  (suite "Key derivation salt lengths"
+         (test "kdf-salt-length"
+               (assert-equal #:expect 8
+                             #:got (kdf-salt-length 'pbkdf2)
+                             #:name "the OpenSSL-compatible layout uses an 8-byte salt")
+               (assert-equal #:expect 16
+                             #:got (kdf-salt-length 'argon2id)
+                             #:name "the Argon2id layout uses a 16-byte salt"))))
+
+
+(define condition-message-suite
+  (suite "Error messages"
+         (test "a diagnostic is the error's own message"
+               (assert-equal #:expect "failed: 42"
+                             #:got (condition-message
+                                    'misc-error
+                                    (list #f "failed: ~a" (list 42) #f))
+                             #:name "the message's format arguments are applied")
+               (assert-equal #:expect "boom"
+                             #:got (condition-message 'misc-error (list #f "boom"))
+                             #:name "a message without arguments is returned as is")
+               (assert-equal #:expect "custom"
+                             #:got (condition-message 'custom-error '("custom"))
+                             #:name "a plain string argument is used when there is no data list"))))
+
+
+(define format-constants-suite
+  (suite "Format constants"
+         (test "layout lengths and Argon2id defaults"
+               (assert-equal #:expect 16
+                             #:got gcm-salt-length
+                             #:name "the GCM outer layer uses a 16-byte salt")
+               (assert-equal #:expect 12
+                             #:got gcm-nonce-length
+                             #:name "the GCM nonce is 12 bytes")
+               (assert-equal #:expect 8
+                             #:got (kdf-salt-length 'pbkdf2)
+                             #:name "PBKDF2 keeps the OpenSSL 8-byte salt")
+               (assert-equal #:expect 'argon2id
+                             #:got (assoc-ref default-argon2id-kdf 'kdf)
+                             #:name "the default Argon2id spec names its derivation")
+               (assert-equal #:expect 65536
+                             #:got (assoc-ref default-argon2id-kdf 'memory-kib)
+                             #:name "the default memory cost is recorded")
+               (assert-equal #:expect 3
+                             #:got (assoc-ref default-argon2id-kdf 'iterations)
+                             #:name "the default pass count is recorded")
+               (assert-equal #:expect 1
+                             #:got (assoc-ref default-argon2id-kdf 'parallelism)
+                             #:name "the default lane count is recorded")
+               (assert-equal #:expect 65536 #:got default-argon2id-memory-kib)
+               (assert-equal #:expect 3 #:got default-argon2id-iterations)
+               (assert-equal #:expect 1 #:got default-argon2id-parallelism)
+               (assert-true (boolean? (argon2id-available?))
+                            #:name "argon2id-available? always answers, never raises"))))
+
+(define error-handler-suite
+  (suite "Error handling helper"
+         (test "call-with-error-handler"
+               (assert-equal #:expect 42
+                             #:got (call-with-error-handler
+                                    (lambda () 42)
+                                    (lambda (key args) 'handled))
+                             #:name "a successful thunk's value is returned unchanged")
+               (assert-equal #:expect "boom"
+                             #:got (call-with-error-handler
+                                    (lambda () (error "boom"))
+                                    (lambda (key args)
+                                      (condition-message key args)))
+                             #:name "an ordinary error is handed to the handler as a message")
+               (assert-equal #:expect 2
+                             #:got (catch 'signal
+                                     (lambda ()
+                                       (call-with-error-handler
+                                        (lambda () (throw 'signal 2))
+                                        (lambda (key args) 'swallowed)))
+                                     (lambda (key value) value))
+                             #:name "a signal is rethrown, so Ctrl-C keeps working")
+               (assert-equal #:expect 'rethrown
+                             #:got (catch 'quit
+                                     (lambda ()
+                                       (call-with-error-handler
+                                        (lambda () (throw 'quit 0))
+                                        (lambda (key args) 'swallowed)))
+                                     (lambda (key value) 'rethrown))
+                             #:name "a quit is rethrown, so exit codes survive the helper"))))
+
 (define (spec)
   (veritas-run base16-suite base64-suite hmac-suite pbkdf2-suite
                argon2id-suite kdf-spec-suite sealed-payload-suite
                authenticated-payload-suite
                openssl-compatibility-suite
                kdf-material-suite randomness-suite byte-encoding-suite
-               gcm-hygiene-suite))
+               gcm-hygiene-suite constant-time-suite salt-length-suite
+               condition-message-suite format-constants-suite
+               error-handler-suite))

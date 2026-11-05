@@ -8,6 +8,7 @@
   #:use-module (ice-9 rdelim)
   #:use-module (ice-9 textual-ports)
   #:use-module (srfi srfi-11)
+  #:use-module (bewaking crypto)
   #:use-module (bewaking bewaking)
   #:use-module (bewaking password)
   #:export (run usage))
@@ -29,6 +30,8 @@ Usage:
   bewaking object decrypt   [options]
   bewaking password strength [PASSWORD]
   bewaking password generate [options]
+  bewaking password hash     [options] [PASSWORD]
+  bewaking password verify   HASH [PASSWORD]
   bewaking help
 
 Keys (required for token/object commands, unless --keyring is given):
@@ -91,6 +94,17 @@ password generate:
   --length N                    password length (default 24)
   --no-symbols                  exclude symbol characters
 
+password hash:
+  PASSWORD (positional) or one line on standard input
+  --kdf-memory-kib N            Argon2id memory cost in KiB (default 65536)
+  --kdf-iterations N            Argon2id passes (default 3)
+  --kdf-parallelism N           Argon2id lanes (default 1)
+
+password verify:
+  HASH                          the PHC string printed by `password hash`
+  PASSWORD (positional) or one line on standard input
+  Exits 1 when the password does not match, so a shell can branch on it.
+
 Examples:
   bewaking token generate --owner-id 42 --owner-name Joe \\
       --permissions read,write --encryption-key \"$K1\" --signing-key \"$K2\"
@@ -101,6 +115,8 @@ Examples:
   bewaking token generate --owner-id 42 --kdf argon2id \\
       --kdf-memory-kib 8192 --encryption-key \"$K1\" --signing-key \"$K2\"
   bewaking password generate --length 32
+  bewaking password hash 'correct horse battery staple'
+  bewaking password verify '$argon2id$v=19$...' 'correct horse battery staple'
 ")
 
 ;; ====== Small helpers ======
@@ -151,17 +167,17 @@ Examples:
 
 (define (read-file file)
   "Read the entire contents of @var{file} as a string."
-  (catch #t
-         (lambda () (call-with-input-file file get-string-all))
-         (lambda (key . args)
-           (cli-error "cannot read file '~a'" file))))
+  (call-with-error-handler
+   (lambda () (call-with-input-file file get-string-all))
+   (lambda (key args)
+     (cli-error "cannot read file '~a'" file))))
 
 (define (read-file-datum file)
   "Read a single Scheme datum from @var{file}."
-  (catch #t
-         (lambda () (call-with-input-file file read))
-         (lambda (key . args)
-           (cli-error "cannot read Scheme datum from '~a'" file))))
+  (call-with-error-handler
+   (lambda () (call-with-input-file file read))
+   (lambda (key args)
+     (cli-error "cannot read Scheme datum from '~a'" file))))
 
 (define (read-stdin-string)
   "Read all of standard input as a string."
@@ -282,26 +298,9 @@ Examples:
 
 (define (exception-message key args)
   "Best-effort human-readable message from an exception caught as
-   @var{key} and @var{args}.
-
-   Guile reports `error` calls through a data list holding the original message
-   and its arguments; where that appears differs between Guile versions, so the
-   list is located structurally and formatted. Falls back to the exception key."
-  (let* ((data (let loop ((rest args))
-                 (cond ((null? rest) #f)
-                       ((and (pair? (car rest)) (string? (caar rest)))
-                        (car rest))
-                       (else (loop (cdr rest))))))
-         (strings (let loop ((rest args) (found '()))
-                    (cond ((null? rest) found)
-                          ((string? (car rest))
-                           (loop (cdr rest) (cons (car rest) found)))
-                          (else (loop (cdr rest) found))))))
-    (cond (data (catch #t
-                        (lambda () (apply format #f data))
-                        (lambda (k . a) (car data))))
-          ((pair? strings) (car strings))
-          (else (format #f "~a" key)))))
+   @var{key} and @var{args}. The library's own diagnostics use the same
+   extraction, so a refusal reads the same in a log and in the CLI."
+  (condition-message key args))
 
 (define last-attempt-error #f)
 
@@ -311,11 +310,11 @@ Examples:
    failure (for example a retired key or an expired envelope) rather than only
    reporting that something went wrong."
   (set! last-attempt-error #f)
-  (catch #t
-         thunk
-         (lambda (key . args)
-           (set! last-attempt-error (exception-message key args))
-           #f)))
+  (call-with-error-handler
+   thunk
+   (lambda (key args)
+     (set! last-attempt-error (exception-message key args))
+     #f)))
 
 (define (failure-detail fallback)
   "Return a parenthesised explanation for the last failed `attempt`, or
@@ -519,13 +518,60 @@ Examples:
                                        #:include-symbols include-symbols))
     (newline)))
 
+(define (password-text positionals label)
+  "The password from the first positional argument, or one line of standard
+   input. Reading it from a pipe keeps it out of the process list."
+  (if (pair? positionals)
+      (car positionals)
+      (let ((line (read-line (current-input-port))))
+        (if (eof-object? line)
+            (cli-error "~a: no password provided" label)
+            line))))
+
+(define (kdf-cost-option options name default)
+  "Return the integer value of @var{name} in @var{options}, or @var{default}."
+  (let ((value (opt options name)))
+    (if value
+        (parse-integer-option value (string-append "--" name))
+        default)))
+
+(define (password-hash-command options positionals)
+  (let* ((password (password-text positionals "password hash"))
+         (hash (attempt
+               (lambda ()
+                 (hash-password
+                  #:password password
+                  #:memory-kib (kdf-cost-option options "kdf-memory-kib"
+                                               default-argon2id-memory-kib)
+                  #:iterations (kdf-cost-option options "kdf-iterations"
+                                                default-argon2id-iterations)
+                   #:parallelism (kdf-cost-option options "kdf-parallelism"
+                                                  default-argon2id-parallelism))))))
+    (if hash
+        (begin (display hash) (newline))
+        (cli-error "failed to hash password ~a" (failure-detail "")))))
+
+(define (password-verify-command options positionals)
+  (unless (pair? positionals)
+    (cli-error "password verify: the hash to check against is required"))
+  (let ((hash (car positionals))
+        (password (password-text (cdr positionals) "password verify")))
+    (if (attempt (lambda () (verify-password #:password password #:hash hash)))
+        (begin (display "password matches") (newline))
+        (cli-error
+         "password does not match the hash ~a"
+         (failure-detail
+          "(a wrong password, a malformed hash, or no Argon2 support)")))))
+
 (define (dispatch-password args)
   (when (null? args)
-    (cli-error "password: missing subcommand (strength or generate)"))
+    (cli-error "password: missing subcommand (strength, generate, hash or verify)"))
   (let-values (((options positionals) (parse-options (cdr args))))
     (case (string->symbol (car args))
       ((strength) (password-strength-command options positionals))
       ((generate) (password-generate-command options))
+      ((hash) (password-hash-command options positionals))
+      ((verify) (password-verify-command options positionals))
       (else (cli-error "password: unknown subcommand '~a'" (car args))))))
 
 ;; ====== entry point ======
@@ -548,10 +594,18 @@ Examples:
   "Run the bewaking command-line interface with @var{args} (a list of strings,
    without the program name). Returns the process exit code: 0 on success and
    1 on any error or usage problem."
-  (catch 'cli-error
-    (lambda ()
-      (dispatch args)
-      0)
-    (lambda (key message)
-      (format (current-error-port) "~a: ~a~%" program-name message)
-      1)))
+  (call-with-error-handler
+   (lambda ()
+     (catch 'cli-error
+       (lambda ()
+         (dispatch args)
+         0)
+       (lambda (key message)
+         (format (current-error-port) "~a: ~a~%" program-name message)
+         1)))
+   (lambda (key args)
+     ;; A failure the command did not anticipate still gets the CLI's own
+     ;; one-line diagnosis rather than a Guile backtrace, and still exits 1.
+     (format (current-error-port) "~a: unexpected error: ~a~%"
+             program-name (exception-message key args))
+     1)))

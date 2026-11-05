@@ -34,7 +34,16 @@
             gcm-encrypt
             gcm-decrypt
             openssl-encrypt
-            openssl-decrypt))
+            openssl-decrypt
+            gcm-salt-length
+            gcm-nonce-length
+            kdf-salt-length
+            default-argon2id-memory-kib
+            default-argon2id-iterations
+            default-argon2id-parallelism
+            constant-time-equal?
+            call-with-error-handler
+            condition-message))
 
 ;; ====== Overview ======
 ;;
@@ -195,6 +204,59 @@
 (define gcry-strerror
   (libgcrypt-procedure '* "gcry_strerror" (list int)))
 
+(define (call-with-error-handler thunk handler)
+  "Call @var{thunk}, passing an ordinary error to @var{handler} as a
+   @var{key} and @var{args} list.
+
+   An asynchronous interrupt is not an ordinary error: a SIGINT arrives as
+   ~(throw 'signal ...)~, and a ~(quit)~ or ~(exit)~ as ~'quit~. Those are
+   rethrown untouched, so wrapping a long derivation in this helper does not
+   make Ctrl-C stop working. Everything else — what ~error~ raises — is handed
+   to @var{handler}, which is why the safe ~decrypt-token~-style wrappers can
+   turn any failure into a value without swallowing the operator's interrupt."
+  (catch #t
+         thunk
+         (lambda (key . args)
+           (if (memq key '(signal quit))
+               (apply throw key args)
+               (handler key args)))))
+
+(define (condition-message key args)
+  "Best-effort human-readable text for an exception caught as @var{key} with
+   @var{args}, for diagnostics that a person has to read.
+
+   Guile reports an ~error~ through a formatting list whose leading element is
+   the report port, and versions differ on whether that list arrives flat in
+   @var{args} or nested inside it, so both shapes are accepted. Falls back to a
+   plain string argument, then to the exception key, so a diagnostic is never
+   lost."
+  (define (first-string rest)
+    (cond ((null? rest) #f)
+          ((string? (car rest)) (car rest))
+          (else (first-string (cdr rest)))))
+  (define (formatting-data)
+    (cond ((and (pair? args) (string? (car args))) args)
+          ((and (pair? args) (eq? #f (car args))
+                (pair? (cdr args)) (string? (cadr args)))
+           (cdr args))
+          (else
+           (let loop ((rest args))
+             (cond ((null? rest) #f)
+                   ((and (pair? (car rest)) (string? (caar rest)))
+                    (car rest))
+                   (else (loop (cdr rest))))))))
+  (let ((data (formatting-data)))
+    (if data
+        (call-with-error-handler
+         (lambda ()
+           (let ((template (car data)))
+             (if (and (pair? (cdr data)) (list? (cadr data)))
+                 (apply format #f template (cadr data))
+                 (apply format #f data))))
+         (lambda (key args) (first-string data)))
+        (or (first-string args)
+            (format #f "~a" key)))))
+
 (define (check-libgcrypt error-code what)
   "Raise an error unless @var{error-code} reports success, describing @var{what}
    and libgcrypt's own message for the failure."
@@ -275,10 +337,19 @@
 
 ;; ====== Base16 (hexadecimal) ======
 
-(define hex-table
-  (let ((table (make-vector 256 #f)))
+;; Two 256-entry vectors of characters, one per nibble. A byte then costs two
+;; `vector-ref's and two `string-set!'s, with no per-byte string allocation and
+;; no second lookup into a two-character string; the `format'-built table this
+;; replaces spent most of its time in `format' once per byte of output.
+(define hex-high-digits
+  (let ((table (make-vector 256 #\0)))
     (do ((i 0 (+ i 1))) ((= i 256) table)
-      (vector-set! table i (format #f "~2,'0x" i)))))
+      (vector-set! table i (string-ref "0123456789abcdef" (quotient i 16))))))
+
+(define hex-low-digits
+  (let ((table (make-vector 256 #\0)))
+    (do ((i 0 (+ i 1))) ((= i 256) table)
+      (vector-set! table i (string-ref "0123456789abcdef" (modulo i 16))))))
 
 (define (bytes->base16 bytes)
   "Return the lowercase hexadecimal encoding of @var{bytes}, one byte per two
@@ -286,23 +357,31 @@
   (let* ((length (bytevector-length bytes))
          (out (make-string (* 2 length) #\0)))
     (do ((i 0 (+ i 1))) ((= i length) out)
-      (let ((digits (vector-ref hex-table (bytevector-u8-ref bytes i))))
-        (string-set! out (* 2 i) (string-ref digits 0))
-        (string-set! out (+ (* 2 i) 1) (string-ref digits 1))))))
+      (let ((byte (bytevector-u8-ref bytes i)))
+        (string-set! out (* 2 i) (vector-ref hex-high-digits byte))
+        (string-set! out (+ (* 2 i) 1) (vector-ref hex-low-digits byte))))))
 
 (define (base16-encode value)
   "Return the lowercase hexadecimal encoding of the string @var{value}, one
    byte per two digits."
   (bytes->base16 (string->utf8 value)))
 
+;; One 256-entry table from character code to digit value, built once instead of
+;; the four range tests the comparison chain used to run for every digit.
+(define hex-values
+  (let ((table (make-vector 256 #f)))
+    (do ((i 0 (+ i 1))) ((= i 10) table)
+      (vector-set! table (+ 48 i) i))
+    (do ((i 0 (+ i 1))) ((= i 6) table)
+      (vector-set! table (+ 97 i) (+ 10 i))
+      (vector-set! table (+ 65 i) (+ 10 i)))
+    table))
+
 (define (hex-digit-value character)
   "Return the value of the hexadecimal digit @var{character}, accepting both
    cases, or #f when it is not a hexadecimal digit."
   (let ((code (char->integer character)))
-    (cond ((and (>= code 48) (<= code 57)) (- code 48))
-          ((and (>= code 97) (<= code 102)) (- code 87))
-          ((and (>= code 65) (<= code 70)) (- code 55))
-          (else #f))))
+    (and (< code 256) (vector-ref hex-values code))))
 
 (define (base16->bytes value)
   "Decode the hexadecimal string @var{value} into a bytevector. Upper and lower
@@ -342,6 +421,13 @@
     (do ((i 0 (+ i 1))) ((= i 64) table)
       (vector-set! table (char->integer (string-ref base64-alphabet i)) i))))
 
+(define base64-characters
+  ;; The Base64 alphabet as a vector of characters, so encoding is a
+  ;; `vector-ref' rather than a `string-ref' into a literal string per byte.
+  (let ((table (make-vector 64 #\A)))
+    (do ((i 0 (+ i 1))) ((= i 64) table)
+      (vector-set! table i (string-ref base64-alphabet i)))))
+
 (define (bytes->base64 bytes)
   "Return the standard, padded, single-line Base64 encoding of @var{bytes}."
   (let* ((length (bytevector-length bytes))
@@ -354,7 +440,7 @@
                        (bytevector-u8-ref bytes (+ (* 3 i) 2)))))
         (do ((j 0 (+ j 1))) ((= j 4))
           (string-set! out (+ (* 4 i) j)
-                       (string-ref base64-alphabet
+                       (vector-ref base64-characters
                                    (logand (ash triple (- (* 6 (- 3 j))))
                                            63))))))
     (unless (zero? rest)
@@ -363,12 +449,14 @@
              (b (if (= rest 2) (bytevector-u8-ref bytes (+ (* 3 full) 1)) 0))
              (triple (+ (* 65536 a) (* 256 b))))
         (string-set! out base
-                     (string-ref base64-alphabet (logand (ash triple -18) 63)))
+                     (vector-ref base64-characters
+                                 (logand (ash triple -18) 63)))
         (string-set! out (+ base 1)
-                     (string-ref base64-alphabet (logand (ash triple -12) 63)))
+                     (vector-ref base64-characters
+                                 (logand (ash triple -12) 63)))
         (when (= rest 2)
           (string-set! out (+ base 2)
-                       (string-ref base64-alphabet
+                       (vector-ref base64-characters
                                    (logand (ash triple -6) 63))))))
     out))
 
@@ -444,6 +532,32 @@
   (utf8->string (base64->bytes value)))
 
 ;; ====== HMAC-SHA256 ======
+
+(define (constant-time-equal? left right)
+  "Return #t when the string or bytevector @var{left} holds the same bytes as
+   the string or bytevector @var{right}.
+
+   Every byte of the shorter-length comparison is examined, and the differences
+   are accumulated before the answer is decided, so the running time depends on
+   the length only: an attacker who can time the check learns nothing about how
+   many leading bytes were right. Lengths that differ answer #f at once, which
+   is the one thing this cannot hide — compare fixed-length material, such as a
+   PBKDF2/Argon2 digest, rather than a variable-length password."
+  (let ((left-bytes (if (string? left) (string->utf8 left) left))
+        (right-bytes (if (string? right) (string->utf8 right) right)))
+    (unless (and (bytevector? left-bytes) (bytevector? right-bytes))
+      (error
+       "bewaking: constant-time-equal? compares two strings or two bytevectors."))
+    (let ((length (bytevector-length left-bytes)))
+      (if (not (= length (bytevector-length right-bytes)))
+          #f
+          (let loop ((index 0) (difference 0))
+            (if (= index length)
+                (zero? difference)
+                (loop (+ index 1)
+                      (logior difference
+                              (logxor (bytevector-u8-ref left-bytes index)
+                                      (bytevector-u8-ref right-bytes index))))))))))
 
 (define (hmac-sha256-digest key message)
   "Return the HMAC-SHA256 of the string @var{message} under the string
@@ -885,6 +999,14 @@
 (define (kdf-name kdf)
   "Return the name of the key-derivation function named by @var{kdf}."
   (assoc-ref (kdf-spec kdf) 'kdf))
+
+(define (kdf-salt-length kdf)
+  "Return the salt length, in bytes, that the derivation named by @var{kdf} uses
+   inside a sealed payload: 8 for the OpenSSL-compatible PBKDF2 layout, 16 for
+   Argon2id. Callers that supply their own salt need this to size it."
+  (case (kdf-name kdf)
+    ((argon2id) argon2id-salt-length)
+    (else salt-length)))
 
 (define* (pbkdf2-sha256 password salt length #:key (iterations pbkdf2-iterations))
   "Derive @var{length} bytes from the string @var{password} and bytevector

@@ -125,7 +125,7 @@ on every field, and returning either #t or #f representing validity status."
    by default, so untrusted decrypted content is treated strictly as data."
   (with-input-from-string payload-string read))
 
-(define* (encrypt-payload payload k #:key (kdf default-kdf))
+(define* (encrypt-payload payload k #:key (kdf default-kdf) salt)
   "Encrypt @var{payload} with AES-256-CBC under the passphrase @var{k}, deriving
    the AES key and IV with @var{kdf} (see @code{kdf-spec} in
    @code{(bewaking crypto)}). The result records which derivation was used, so
@@ -152,11 +152,15 @@ on every field, and returning either #t or #f representing validity status."
    #:key kdf: the key-derivation specification; @code{'pbkdf2} (the default)
               keeps the OpenSSL-compatible layout, @code{'argon2id} selects
               Argon2id with its default parameters.
+   #:key salt: the salt bytes to use (8 for PBKDF2, 16 for Argon2id); the
+              default is fresh random bytes. Supplying one is how a caller
+              reproduces a sealed blob exactly, for a stored test vector or a
+              cross-implementation check.
 
    #:example
      (encrypt-payload \"mysecretdata\" \"mysecretkey\")
      (encrypt-payload \"mysecretdata\" \"mysecretkey\" #:kdf 'argon2id)"
-  (kdf-encrypt payload k #:kdf kdf))
+  (kdf-encrypt payload k #:kdf kdf #:salt salt))
 
 (define (decrypt-payload payload k)
   "Decrypt a payload previously produced by `encrypt-payload`, by
@@ -178,7 +182,8 @@ on every field, and returning either #t or #f representing validity status."
   (kdf-decrypt payload k))
 
 (define* (seal-authenticated-body plaintext encryption-key signing-key
-                                  #:key (kdf default-kdf) associated-data)
+                                  #:key (kdf default-kdf) salt outer-salt nonce
+                                  associated-data)
   "Seal @var{plaintext} into the body of a BWK3 envelope, as Base16.
 
    The plaintext is first encrypted under the encryption key with AES-256-CBC,
@@ -186,11 +191,18 @@ on every field, and returning either #t or #f representing validity status."
    then sealed with AES-256-GCM under a key derived from the signing key with
    @var{kdf}, and the tag covers @var{associated-data} — the envelope header —
    as well as the ciphertext, so the header cannot be altered without the body
-   failing to open."
+   failing to open.
+
+   #:key salt:       the inner layer's salt; defaults to fresh random bytes.
+   #:key outer-salt: the GCM layer's salt; defaults to fresh random bytes.
+   #:key nonce:      the GCM nonce; defaults to fresh random bytes, and must
+                     never repeat under one key. Supplying these three is what
+                     makes a whole envelope reproducible; see `seal-envelope'."
   (let* ((inner (string-trim-right (encrypt-payload plaintext encryption-key
-                                                    #:kdf kdf)))
+                                                    #:kdf kdf #:salt salt)))
          (garbled (string-garble inner)))
     (gcm-encrypt (string->utf8 garbled) signing-key #:kdf kdf
+                 #:salt outer-salt #:nonce nonce
                  #:associated-data associated-data)))
 
 (define* (open-authenticated-body body encryption-key signing-key
@@ -337,14 +349,14 @@ on every field, and returning either #t or #f representing validity status."
       ;; an unparseable input into an exception. #f means "nothing readable
       ;; here", which is also the wrong thing to log and the right reason to
       ;; refuse the value everywhere else.
-      (catch #t
-             (lambda ()
-               (let ((info (parse-envelope sealed)))
-                 (list (cons 'version (assoc-ref info 'version))
-                       (cons 'key-id (assoc-ref info 'key-id))
-                       (cons 'created-at (assoc-ref info 'created-at))
-                       (cons 'expires-at (assoc-ref info 'expires-at)))))
-             (lambda (key . args) #f))
+      (call-with-error-handler
+       (lambda ()
+         (let ((info (parse-envelope sealed)))
+           (list (cons 'version (assoc-ref info 'version))
+                 (cons 'key-id (assoc-ref info 'key-id))
+                 (cons 'created-at (assoc-ref info 'created-at))
+                 (cons 'expires-at (assoc-ref info 'expires-at)))))
+       (lambda (key args) #f))
       #f))
 
 (define* (envelope-expired? #:key sealed (now (current-time)))
@@ -413,7 +425,7 @@ on every field, and returning either #t or #f representing validity status."
 (define* (seal-envelope #:key plaintext encryption-key signing-key
                         (key-id default-key-id)
                         (created-at (current-time)) expires-at ttl-seconds
-                        (kdf default-kdf))
+                        (kdf default-kdf) (random-source random-bytes))
   "Seal a plaintext string into a versioned, authenticated envelope.
 
    The output is
@@ -432,6 +444,12 @@ on every field, and returning either #t or #f representing validity status."
                       by @code{kdf-spec} in @code{(bewaking crypto)}. The
                       choice is recorded in the sealed body, so opening needs
                       no matching option.
+   #:key random-source: a procedure taking a byte count and returning that many
+                      bytes; defaults to `random-bytes', libgcrypt's CSPRNG.
+                      It supplies the inner salt, the GCM salt and the nonce.
+                      Override it only to reproduce an envelope exactly (in a
+                      test vector, or a compatibility check): a constant source
+                      reuses nonces, which is unsafe for real data.
 
    #:example
      (seal-envelope #:plaintext some-plaintext #:encryption-key k1
@@ -465,6 +483,12 @@ on every field, and returning either #t or #f representing validity status."
                          (or effective-expires no-expiry-marker)))
          (body (seal-authenticated-body plaintext encryption-key signing-key
                                         #:kdf kdf
+                                        #:salt (random-source
+                                                (kdf-salt-length kdf))
+                                        #:outer-salt (random-source
+                                                      gcm-salt-length)
+                                        #:nonce (random-source
+                                                 gcm-nonce-length)
                                         #:associated-data
                                         (string->utf8 header))))
     (format #f "~a.~a" header body)))
@@ -508,17 +532,17 @@ on every field, and returning either #t or #f representing validity status."
    so an unknown, retired or not-yet-active key id is indistinguishable from a
    bad key — in the message returned and in the work spent producing it."
   (let ((resolved
-         (catch #t
-           (lambda ()
-             (call-with-values
-                 (lambda ()
-                   (key-material #:keyring keyring #:key-id key-id
-                                 #:encryption-key encryption-key
-                                 #:signing-key signing-key #:now now))
-               (lambda (encryption signing)
-                 ;; An entry that is missing a key is as unusable as no entry.
-                 (and encryption signing (cons encryption signing)))))
-           (lambda (key . args) #f))))
+         (call-with-error-handler
+          (lambda ()
+            (call-with-values
+                (lambda ()
+                  (key-material #:keyring keyring #:key-id key-id
+                                #:encryption-key encryption-key
+                                #:signing-key signing-key #:now now))
+              (lambda (encryption signing)
+                ;; An entry that is missing a key is as unusable as no entry.
+                (and encryption signing (cons encryption signing)))))
+          (lambda (key args) #f))))
     (if resolved
         (values (car resolved) (cdr resolved))
         (values (unresolved-key-placeholder)
@@ -568,19 +592,19 @@ on every field, and returning either #t or #f representing validity status."
          ;; established, so telling an operator "this expired" reveals nothing
          ;; an attacker could not already see in the envelope's own header.
          (plaintext
-          (catch #t
-            (lambda ()
-              (let-values (((encryption signing)
-                            (usable-key-material
-                             #:keyring keyring #:key-id key-id
-                             #:encryption-key encryption-key
-                             #:signing-key signing-key #:now now)))
-                ;; The tag is checked while the body is opened, so a plaintext
-                ;; exists only once the metadata has proved authentic.
-                (open-authenticated-body
-                 body encryption signing
-                 #:associated-data (string->utf8 (envelope-header info)))))
-            (lambda (key . args) (refuse-unreadable-envelope)))))
+          (call-with-error-handler
+           (lambda ()
+             (let-values (((encryption signing)
+                           (usable-key-material
+                            #:keyring keyring #:key-id key-id
+                            #:encryption-key encryption-key
+                            #:signing-key signing-key #:now now)))
+               ;; The tag is checked while the body is opened, so a plaintext
+               ;; exists only once the metadata has proved authentic.
+               (open-authenticated-body
+                body encryption signing
+                #:associated-data (string->utf8 (envelope-header info)))))
+           (lambda (key args) (refuse-unreadable-envelope)))))
     (check-envelope-freshness info enforce-expiry? now max-age-seconds)
     plaintext))
 
@@ -588,7 +612,9 @@ on every field, and returning either #t or #f representing validity status."
                                 (key-id default-key-id)
                                 get-owner-details
                                 (token-validity-seconds (* 7 24 3600))
-                                ttl-seconds expires-at (kdf default-kdf))
+                                ttl-seconds expires-at (kdf default-kdf)
+                                (now (current-time)) token-id
+                                (random-source random-bytes))
   "Generates a secure, versioned, authenticated token.
 
   #:key encryption-key:   The secret key (string) used for AES-256 encryption.
@@ -608,16 +634,27 @@ on every field, and returning either #t or #f representing validity status."
   #:key kdf:              How the AES keys are derived from the two keys. Use
                           @code{'argon2id} for a memory-hard derivation; the
                           default is PBKDF2, which is what older tokens use.
+  #:key now:              Unix timestamp to record as the creation time and
+                          to compute the expiry from (default: the wall clock).
+                          Supplying it makes a token reproducible.
+  #:key token-id:         The UUID to record as the token id (default: a fresh
+                          random one). Supplying it makes a token reproducible.
+  #:key random-source:    A procedure taking a byte count and returning that
+                          many bytes; defaults to the CSPRNG. Override it only
+                          together with 'now' and 'token-id', and only to
+                          reproduce a token exactly: a constant source reuses
+                          nonces, which is unsafe for real data.
   #:returns: A versioned, authenticated token string."
 
   (let* ((owner-details (get-owner-details))
          (owner-id (assoc-ref owner-details
                               'id))
-         (current-timestamp (current-time))
+         (current-timestamp now)
          (expiration-timestamp (+ current-timestamp token-validity-seconds))
 
          (payload `((token-type . bewaking-token) (token-id unquote
-                                                            (generate-string-uuid))
+                                                            (or token-id
+                                                                (generate-string-uuid)))
                     (token-created-at unquote current-timestamp)
                     (token-expires-at unquote expiration-timestamp)
                     (owner-id unquote owner-id)
@@ -655,8 +692,10 @@ on every field, and returning either #t or #f representing validity status."
                      #:encryption-key effective-encryption-key
                      #:signing-key effective-signing-key
                      #:key-id key-id
+                     #:created-at current-timestamp
                      #:ttl-seconds ttl-seconds #:expires-at expires-at
-                     #:kdf kdf))))
+                     #:kdf kdf
+                     #:random-source random-source))))
 
 (define* (unsafe-decrypt-token #:key token encryption-key signing-key
                                keyring
@@ -716,7 +755,8 @@ on every field, and returning either #t or #f representing validity status."
     payload))
 
 (define* (decrypt-token #:key token encryption-key signing-key keyring
-                        (enforce-expiry? #t) max-age-seconds)
+                        (enforce-expiry? #t) max-age-seconds
+                        (now (current-time)))
   "Safely attempts to decrypt a given token.
    This function acts as a wrapper around `unsafe-decrypt-token`,
    catching any errors that occur during the decryption process.
@@ -733,21 +773,26 @@ on every field, and returning either #t or #f representing validity status."
    Returns:
      The decrypted token payload if successful, otherwise `#f`
      (false) and prints an error message to the console."
-  (catch #t
-         (lambda ()
-           (unsafe-decrypt-token #:token token
-                                 #:encryption-key encryption-key
-                                 #:signing-key signing-key
-                                 #:keyring keyring
-                                 #:enforce-expiry? enforce-expiry?
-                                 #:max-age-seconds max-age-seconds))
-         (lambda (key . args)
-           (display (format #f "error decrypting token: ~a: ~a" key args)) #f)))
+  (call-with-error-handler
+   (lambda ()
+     (unsafe-decrypt-token #:token token
+                           #:encryption-key encryption-key
+                           #:signing-key signing-key
+                           #:keyring keyring
+                           #:enforce-expiry? enforce-expiry?
+                           #:max-age-seconds max-age-seconds
+                           #:now now))
+   (lambda (key args)
+     (format (current-error-port) "error decrypting token: ~a~%"
+             (condition-message key args))
+     #f)))
 
 (define* (generate-token #:key encryption-key signing-key keyring (key-id default-key-id)
                          get-owner-details
                          (token-validity-seconds (* 7 24 3600))
-                         ttl-seconds expires-at (kdf default-kdf))
+                         ttl-seconds expires-at (kdf default-kdf)
+                         (now (current-time)) token-id
+                         (random-source random-bytes))
   "Safely attempts to generate a new token.
    This function wraps `unsafe-generate-token` to gracefully handle
    any potential errors during token creation.
@@ -767,24 +812,30 @@ on every field, and returning either #t or #f representing validity status."
    Returns:
      A newly generated token string if successful, otherwise `#f`
      (false) and prints an error message to the console."
-  (catch #t
-         (lambda ()
-           (unsafe-generate-token #:encryption-key encryption-key
-                                  #:signing-key signing-key
-                                  #:keyring keyring
-                                  #:key-id key-id
-                                  #:get-owner-details get-owner-details
-                                  #:token-validity-seconds
-                                  token-validity-seconds
-                                  #:ttl-seconds ttl-seconds
-                                  #:expires-at expires-at
-                                  #:kdf kdf))
-         (lambda (key . args)
-           (display (format #f "Couldn't generate token: ~a: ~a" key args)) #f)))
+  (call-with-error-handler
+   (lambda ()
+     (unsafe-generate-token #:encryption-key encryption-key
+                            #:signing-key signing-key
+                            #:keyring keyring
+                            #:key-id key-id
+                            #:get-owner-details get-owner-details
+                            #:token-validity-seconds
+                            token-validity-seconds
+                            #:ttl-seconds ttl-seconds
+                            #:expires-at expires-at
+                            #:kdf kdf
+                            #:now now
+                            #:token-id token-id
+                            #:random-source random-source))
+   (lambda (key args)
+     (format (current-error-port) "Couldn't generate token: ~a~%"
+             (condition-message key args))
+     #f)))
 
 (define* (unsafe-encrypt-object #:key payload encryption-key signing-key
                                 keyring (key-id default-key-id)
-                                ttl-seconds expires-at (kdf default-kdf))
+                                ttl-seconds expires-at (kdf default-kdf)
+                                created-at (random-source random-bytes))
   "Seal an arbitrary Scheme datum (not just a token payload) into a portable,
    versioned, authenticated string. Any value that `write` can serialize is
    supported: alists, lists, vectors, numbers, strings, booleans, etc.
@@ -826,28 +877,35 @@ on every field, and returning either #t or #f representing validity status."
                    #:encryption-key effective-encryption-key
                    #:signing-key effective-signing-key
                    #:key-id key-id
+                   #:created-at (or created-at (current-time))
                    #:ttl-seconds ttl-seconds #:expires-at expires-at
-                   #:kdf kdf)))
+                   #:kdf kdf
+                   #:random-source random-source)))
 
 (define* (encrypt-object #:key payload encryption-key signing-key
                          keyring (key-id default-key-id)
-                         ttl-seconds expires-at (kdf default-kdf))
+                         ttl-seconds expires-at (kdf default-kdf)
+                         created-at (random-source random-bytes))
   "Safely seal an arbitrary Scheme datum. Wraps `unsafe-encrypt-object`,
    catching errors and returning #f instead of raising.
 
    See `unsafe-encrypt-object` for the keyword arguments."
-  (catch #t
-         (lambda ()
-           (unsafe-encrypt-object #:payload payload
-                                  #:encryption-key encryption-key
-                                  #:signing-key signing-key
-                                  #:keyring keyring
-                                  #:key-id key-id
-                                  #:ttl-seconds ttl-seconds
-                                  #:expires-at expires-at
-                                  #:kdf kdf))
-         (lambda (key . args)
-           (display (format #f "Couldn't encrypt object: ~a: ~a" key args)) #f)))
+  (call-with-error-handler
+   (lambda ()
+     (unsafe-encrypt-object #:payload payload
+                            #:encryption-key encryption-key
+                            #:signing-key signing-key
+                            #:keyring keyring
+                            #:key-id key-id
+                            #:ttl-seconds ttl-seconds
+                            #:expires-at expires-at
+                            #:kdf kdf
+                            #:created-at created-at
+                            #:random-source random-source))
+   (lambda (key args)
+     (format (current-error-port) "Couldn't encrypt object: ~a~%"
+             (condition-message key args))
+     #f)))
 
 (define* (unsafe-decrypt-object #:key object encryption-key signing-key
                                 keyring
@@ -897,21 +955,25 @@ on every field, and returning either #t or #f representing validity status."
 
 (define* (decrypt-object #:key object encryption-key signing-key
                          keyring
-                         (enforce-expiry? #t) max-age-seconds)
+                         (enforce-expiry? #t) max-age-seconds
+                         (now (current-time)))
   "Safely reopen a string produced by `encrypt-object`. Wraps
    `unsafe-decrypt-object`, catching errors and returning #f instead of raising.
 
    See `unsafe-decrypt-object` for the keyword arguments."
-  (catch #t
-         (lambda ()
-           (unsafe-decrypt-object #:object object
-                                  #:encryption-key encryption-key
-                                  #:signing-key signing-key
-                                  #:keyring keyring
-                                  #:enforce-expiry? enforce-expiry?
-                                  #:max-age-seconds max-age-seconds))
-         (lambda (key . args)
-           (display (format #f "error decrypting object: ~a: ~a" key args)) #f)))
+  (call-with-error-handler
+   (lambda ()
+     (unsafe-decrypt-object #:object object
+                            #:encryption-key encryption-key
+                            #:signing-key signing-key
+                            #:keyring keyring
+                            #:enforce-expiry? enforce-expiry?
+                            #:max-age-seconds max-age-seconds
+                            #:now now))
+   (lambda (key args)
+     (format (current-error-port) "error decrypting object: ~a~%"
+             (condition-message key args))
+     #f)))
 
 (define* (has-needed-permissions? #:key needed present)
   "Check if needed permissions are a subset of the present (existing) permissions."
