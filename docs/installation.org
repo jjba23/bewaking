@@ -61,7 +61,7 @@ These are only needed to develop bewaking, run its tests, or build its docs.
 | =guile-json=      | Transitive dependency of =guile-veritas= (reporting)        |
 | =guile-fibers=    | Transitive dependency of =guile-veritas= (concurrent tests) |
 | =guile-ares-rs=   | Optional nREPL server for the =repl= task                   |
-| =guile-documenta= | Generating the technical API documentation                  |
+| =guile-dokgen=    | Generating the technical API documentation                  |
 | =texinfo=         | Rendering generated Texinfo docs to HTML                    |
 | =watchexec=       | Hot-reloading during development (=dev= / =hr= tasks)       |
 | =guix= and =maak= | The reproducible task runner and environment manager        |

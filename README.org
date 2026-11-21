@@ -36,7 +36,7 @@ merely looks like a token, is refused rather than guessed at.
 
 You can find the technical Guile Scheme API documentation for Bewaking here:
 
-https://jointhefreeworld.org/api-docs/bewaking/API.html
+https://jointhefreeworld.org/api-docs/bewaking/index.html
 
 ----------------
 
@@ -98,6 +98,24 @@ others where a topic continues:
 | [[file:docs/web.org][Web applications]] | Stateless sessions, protected routes, sealed state and revocation. |
 | [[file:docs/security.org][Security model]] | The threat model, key handling, and what publishing the source gives an attacker. |
 | [[file:docs/development.org][Development, testing and documentation]] | Running the suite and what it covers, docs generation and Guix reproducibility. |
+
+** How a sealed envelope is put together
+:PROPERTIES:
+:CUSTOM_ID: envelope-anatomy
+:END:
+
+An envelope is sealed twice: the plaintext is encrypted under the caller's
+encryption key, the payload that comes out is garbled, and the garbled text is
+sealed again under a key derived from the signing key.  The outer layer's cipher
+tag authenticates the header -- version, key id and the two timestamps -- as
+associated data, so a header that was altered is a body that does not open.
+
+#+attr_html: :width 720 :alt The two sealing layers of a bewaking envelope
+[[file:resources/diagrams/envelope.svg]]
+
+The source of the diagram is [[file:resources/diagrams/envelope.mmd][resources/diagrams/envelope.mmd]];
+~maak diagrams~ renders every source under ~resources/diagrams~ to the SVG
+beside it.
 
 The suite runs with ~maak test~; the full coverage list and the documentation
 build live in [[file:docs/development.org::#testing][Testing]] and

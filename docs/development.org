@@ -93,15 +93,19 @@ The user guide is split across [[file:index.org][docs/]], one document per topic
 The generated API reference is separate from it and describes each exported
 binding.
 
-Generate the technical API documentation (requires ~guile-documenta~ and
-~texinfo~):
+Generate the technical API documentation (requires ~guile-dokgen~ and
+~texinfo~; both come from the channels ~channels.scm~ pins, so ~maak docs~
+enters that environment itself):
 
 #+begin_src shell
 maak docs
 #+end_src
 
 The generated HTML is written to =doc/api-dist= and includes every exported
-binding from both ~(bewaking bewaking)~ and ~(bewaking password)~.
+binding from both ~(bewaking bewaking)~ and ~(bewaking password)~.  The
+mermaid diagrams a commentary carries are drawn into =doc/api/diagrams= and
+referenced from the page, which also loads =dokgen.css= and =dokgen.js= from
+the same directory.
 
 ----------------
 

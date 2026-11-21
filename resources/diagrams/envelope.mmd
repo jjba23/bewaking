@@ -1,0 +1,6 @@
+flowchart LR
+  plaintext[plaintext] --> inner[AES-256-CBC under the encryption key]
+  inner --> garble[string-garble]
+  header[header: version, key id, timestamps] --> outer
+  garble --> outer[AES-256-GCM under the signing key]
+  outer --> envelope[BWK3 key-id created-at expires-at body]

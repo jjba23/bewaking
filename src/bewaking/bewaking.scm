@@ -3,6 +3,31 @@
 ;; SPDX-License-Identifier: MIT
 ;; Copyright © Josep Bigorra <jjbigorra@gmail.com>
 
+;;; Commentary:
+;;
+;; Tokens, sealed objects and the envelope they travel in.
+;;
+;; An envelope is sealed twice: the plaintext is encrypted under the caller's
+;; encryption key, the Base64 payload that comes out is garbled, and the
+;; garbled text is sealed again under a key derived from the signing key.  The
+;; outer layer's cipher tag is the integrity check, and it authenticates the
+;; header -- the version, the key id and the two timestamps -- as associated
+;; data, so a header that was altered is a body that does not open.
+;;
+;; ```mermaid
+;; flowchart LR
+;;   plaintext["plaintext"] --> inner["AES-256-CBC<br/>encryption key"]
+;;   inner --> garble["string-garble"]
+;;   header["header: version,<br/>key id, timestamps"] --> outer
+;;   garble --> outer["AES-256-GCM<br/>signing key"]
+;;   outer --> envelope["BWK3 envelope:<br/>header and body"]
+;; ```
+;;
+;; `open-envelope' walks the same path backwards, and refuses a body whose tag
+;; does not verify before it looks at the expiry it was told to enforce.
+;;
+;;; Code:
+
 (define-module (bewaking bewaking)
   #:use-module (uuid generate)
   #:use-module (ice-9 format)
