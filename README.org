@@ -10,6 +10,8 @@
 #+attr_html: :width 160 :alt Bewaking logo
 [[file:logo.svg]]
 
+- 📖 *API reference:* [[https://jointhefreeworld.org/api-docs/bewaking/index.html][Bewaking API reference]]
+
 bewaking provides functionalities to (double) encrypt and decrypt data, aided by a custom obfuscation algorithm.
 
 It also provides a domain-specific language (DSL) to be used for authorization, authentication and token generation for your Guile Scheme projects, including a simple user permission system, and a password-strength module to measure, classify and generate passwords without leaving Guile.
