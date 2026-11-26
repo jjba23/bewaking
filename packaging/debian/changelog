@@ -1,3 +1,10 @@
+bewaking (0.5.14-1) unstable; urgency=medium
+
+  * Pin the channel that carries guile-dokgen 0.12.0: every definition in the
+    published API reference opens to its source, on a quieter page.
+
+ -- Josep Bigorra <jjbigorra@gmail.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
 bewaking (0.5.6-1) unstable; urgency=medium
 
   * Build against the jointhefreeworld collection at v1.0.4.

@@ -13,7 +13,7 @@
 %global debug_package %{nil}
 
 Name:           bewaking
-Version:        0.5.1
+Version:        0.5.14
 Release:        0
 Summary:        Authentication and authorization library for Guile Scheme
 License:        MIT
